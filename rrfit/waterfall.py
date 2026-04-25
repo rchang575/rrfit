@@ -219,7 +219,7 @@ def QIntVsTemp_consistent(temp, params, freq0, power, Qc, Qint_init):
             freq0[i],
             currentPower,
             Qc,
-            qint_init[i],
+            Qint_init[i],
         )
     return QInt
 
