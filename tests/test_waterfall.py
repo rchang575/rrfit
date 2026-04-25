@@ -4,7 +4,9 @@ from lmfit import Parameters
 import numpy as np
 
 from rrfit.dataio import Device
+from rrfit.fitfns import dBmtoW
 from rrfit.waterfall import (
+    _get_waterfall_arrays,
     _solve_consistent_qint,
     _store_waterfall_fit_summary,
     _solve_consistent_qint_reduced,
@@ -39,6 +41,29 @@ def test_store_waterfall_fit_summary_sets_summary_compatible_attrs():
     assert device.waterfall_best_values["Q_TLS0"] == 3.0
     assert device.waterfall_param_errors["delta_QP0"] == 0.25
     assert np.isnan(device.waterfall_param_errors["Q_TLS0"])
+
+
+def test_get_waterfall_arrays_accepts_legacy_attenuation_attr():
+    trace = type(
+        "Trace",
+        (),
+        {
+            "is_excluded": False,
+            "power": -80.0,
+            "temperature": 0.1,
+            "fr": 5e9,
+            "Qi": 1e5,
+            "Qi_err": 1e3,
+            "absQc": 2e4,
+            "Ql": 1.67e4,
+        },
+    )()
+    device = Device(name="device", traces=[trace])
+    device.attenuation = 70.0
+
+    arrays = _get_waterfall_arrays(device)
+
+    assert arrays["power_watts"][0] == dBmtoW(-150.0)
 
 
 def test_fitIterated_uses_best_fitted_params_for_final_refit(monkeypatch):

@@ -27,9 +27,20 @@ def _active_traces(device: Device):
     return [tr for tr in device.traces if not tr.is_excluded]
 
 
+def _get_device_line_attenuation(device: Device):
+    line_attenuation = getattr(device, "line_attenuation", None)
+    if line_attenuation is not None:
+        return line_attenuation
+
+    attenuation = getattr(device, "attenuation", 0)
+    if attenuation is None:
+        return 0
+    return attenuation
+
+
 def _get_waterfall_arrays(device: Device):
     traces = _active_traces(device)
-    line_attenuation = getattr(device, "line_attenuation", 0)
+    line_attenuation = _get_device_line_attenuation(device)
 
     devPowerArray_W = np.array([dBmtoW(tr.power - line_attenuation) for tr in traces])
     tempArray = np.array([tr.temperature for tr in traces])
@@ -623,7 +634,8 @@ def plot_Qi_vs_temp(
         Qc = np.mean(np.array([tr.absQc for tr in traces]))
         Ql = np.array([tr.Ql for tr in traces])
         freq0List = np.array([tr.fr for tr in traces])
-        devPowerArray_W = np.array([dBmtoW(tr.power - device.line_attenuation) for tr in traces])
+        line_attenuation = _get_device_line_attenuation(device)
+        devPowerArray_W = np.array([dBmtoW(tr.power - line_attenuation) for tr in traces])
 
        #ax.errorbar(temp, Qi, yerr=Qi_err, mec=f"C{idx}", ls="", mfc=f"C{idx}", marker="o", ms=6, label=f"{power:.1f} dBm")
 
