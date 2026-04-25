@@ -198,6 +198,27 @@ def _solve_consistent_qint_local(
     return out.params["Qint"].value
 
 
+def _solve_consistent_qint_with_method(
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    fitQP=True,
+    inner_solver="local",
+):
+    if inner_solver == "local":
+        return _solve_consistent_qint_local(
+            outerParams, temp, freq0, power, Qc, qint_init, fitQP=fitQP
+        )
+    if inner_solver == "fast":
+        return _solve_consistent_qint(
+            outerParams, temp, freq0, power, Qc, qint_init, fitQP=fitQP
+        )
+    raise ValueError(f"Unknown inner_solver: {inner_solver!r}. Use 'local' or 'fast'.")
+
+
 def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
     return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
 
@@ -219,12 +240,21 @@ def predict_qint_consistent_curve(
     qint_init,
     max_refinement_passes=6,
     tail_convergence_tol=1e-3,
+    inner_solver="local",
 ):
     prediction = np.asarray(qint_init, dtype=float)
     attempts = max(1, max_refinement_passes)
 
     for _ in range(attempts):
-        prediction = QIntVsTemp_consistent(temp, params, freq0, power, Qc, prediction)
+        prediction = QIntVsTemp_consistent(
+            temp,
+            params,
+            freq0,
+            power,
+            Qc,
+            prediction,
+            inner_solver=inner_solver,
+        )
         if not _consistent_tail_needs_refinement(prediction, tail_convergence_tol):
             break
 
@@ -271,16 +301,18 @@ def QIntVsTemp_consistent(
     power,
     Qc,
     Qint_init,
+    inner_solver="local",
 ):
     QInt = np.zeros(np.size(power))
     for i, currentPower in enumerate(power):
-        QInt[i] = _solve_consistent_qint_local(
+        QInt[i] = _solve_consistent_qint_with_method(
             params,
             temp[i],
             freq0[i],
             currentPower,
             Qc,
             Qint_init[i],
+            inner_solver=inner_solver,
         )
     return QInt
 
@@ -294,6 +326,7 @@ def QIntVsTemp_consistent_error_function(
     Qint_init,
     data,
     errors,
+    inner_solver="local",
 ):
     resid = []
 
@@ -307,6 +340,7 @@ def QIntVsTemp_consistent_error_function(
                 [power[i]],
                 Qc,
                 [Qint_init[i]],
+                inner_solver=inner_solver,
             )[0]
         ) / errors[i]
         #res = (data[i] - QIntVsTemp_consistent([temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]])[0])
@@ -362,6 +396,7 @@ def plot_Qi_vs_temp(
     figsize=(12, 8),
     plotParams=None,
     fitFunc=QIntVsTemp_consistent,
+    inner_solver="local",
 ):
     """ """
     
@@ -405,6 +440,7 @@ def plot_Qi_vs_temp(
                     np.ones(np.size(tempAxis)) * devPowerArray_W[0],
                     Qc,
                     QIntInterp,
+                    inner_solver=inner_solver,
                 )
 
                 # plot the final data
@@ -471,7 +507,17 @@ def plot_Qi_vs_temp(
 #   finalDict - same as initDict, but saves the result of the fit
 #   red_chi2 - numpy array, length numIter - reduced chi2 values corresponding to the fits
 #   and a list of figures created if makePlot=True
-def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fitQP=True, retries = 10, init_params=None):
+def fitIterated(
+    device,
+    boundsDict,
+    numIter,
+    consistent=False,
+    makePlot=True,
+    fitQP=True,
+    retries=10,
+    init_params=None,
+    inner_solver="local",
+):
 
     if init_params is None:
         init_params = _default_waterfall_params()
@@ -511,6 +557,7 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
                         init_params,
                         consistent=consistent,
                         makePlot=False,
+                        inner_solver=inner_solver,
                     ),
                     makePlot=False,
                 )
@@ -545,6 +592,7 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
                 device.best_params,
                 consistent=consistent,
                 makePlot=True,
+                inner_solver=inner_solver,
             ),
             makePlot=True,
         )
@@ -555,6 +603,7 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
                 device.best_params,
                 consistent=consistent,
                 makePlot=False,
+                inner_solver=inner_solver,
             ),
             makePlot=False,
         )
@@ -573,6 +622,7 @@ def fit_waterfall_staged(
     makePlot=True,
     retries=10,
     init_params=None,
+    inner_solver="local",
 ):
     """
     Faster waterfall workflow:
@@ -595,6 +645,7 @@ def fit_waterfall_staged(
         makePlot=False,
         retries=retries,
         init_params=init_params.copy(),
+        inner_solver=inner_solver,
     )
     coarse_best_params = device.best_params.copy()
 
@@ -609,6 +660,7 @@ def fit_waterfall_staged(
             makePlot=False,
             retries=retries,
             init_params=coarse_best_params.copy(),
+            inner_solver=inner_solver,
         )
 
     device.waterfall_staged_result = {
@@ -621,6 +673,7 @@ def fit_waterfall_staged(
         device.best_params.copy(),
         consistent=True,
         makePlot=makePlot,
+        inner_solver=inner_solver,
     )
     device.best_params = final_fit_params
 
@@ -684,6 +737,7 @@ def Fit_QIntVsTemp(
     init_params,
     consistent=False,
     makePlot=True,
+    inner_solver="local",
 ):
     # rewritten from scratch by Russell, Sept 7, 2022
     # there is a separate set of calls to deal with the case when the QInt calculation is done in a self-consistent
@@ -719,6 +773,7 @@ def Fit_QIntVsTemp(
                     QIntArray,
                     QIntArray,
                     QIntErrArray,
+                    inner_solver,
                 ),
                 method="least_squares")
         print("Done consistent fit")
@@ -752,6 +807,7 @@ def Fit_QIntVsTemp(
             device,
             fitFunc=fitFunc,
             plotParams=out_main.params,
+            inner_solver=inner_solver,
         )
         #ax.set_title('Fitted params, ' + device.name)
         # Print out fit parameters:

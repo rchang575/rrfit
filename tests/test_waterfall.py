@@ -2,6 +2,7 @@ from collections import deque
 
 from lmfit import Parameters
 import numpy as np
+import pytest
 
 from rrfit.dataio import Device
 from rrfit.fitfns import dBmtoW
@@ -72,7 +73,7 @@ def test_fitIterated_uses_best_fitted_params_for_final_refit(monkeypatch):
     def fake_uniform(_lower, _upper):
         return draws.popleft()
 
-    def fake_fit(device, params, consistent=False, makePlot=True):
+    def fake_fit(device, params, consistent=False, makePlot=True, inner_solver="local"):
         call_count["value"] += 1
         fit_params = params.copy()
         if call_count["value"] <= 2:
@@ -105,8 +106,17 @@ def test_fitIterated_uses_best_fitted_params_for_final_refit(monkeypatch):
 def test_predict_qint_consistent_curve_stops_after_bounded_refinement(monkeypatch):
     calls = {"count": 0}
 
-    def fake_consistent(temp, params, freq0, power, qc, qint_init):
+    def fake_consistent(
+        temp,
+        params,
+        freq0,
+        power,
+        qc,
+        qint_init,
+        inner_solver="local",
+    ):
         calls["count"] += 1
+        assert inner_solver == "local"
         if calls["count"] == 1:
             return [1.0, 1.0005]
         return [1.0, 2.0]
@@ -139,15 +149,24 @@ def test_fit_waterfall_staged_runs_fast_search_then_final_consistent_fit(monkeyp
         fitQP=True,
         retries=10,
         init_params=None,
+        inner_solver="local",
     ):
-        calls.append(("fitIterated", consistent, numIter))
+        calls.append(("fitIterated", consistent, numIter, inner_solver))
         best = init_params.copy()
         best["delta_QP0"].value = 3.0 if not consistent else 4.0
         device.best_params = best
         return "search"
 
-    def fake_fit_qint(device, init_params, consistent=False, makePlot=True):
-        calls.append(("Fit_QIntVsTemp", consistent, init_params["delta_QP0"].value))
+    def fake_fit_qint(
+        device,
+        init_params,
+        consistent=False,
+        makePlot=True,
+        inner_solver="local",
+    ):
+        calls.append(
+            ("Fit_QIntVsTemp", consistent, init_params["delta_QP0"].value, inner_solver)
+        )
         final_params = init_params.copy()
         final_params["delta_QP0"].value += 1.0
         return final_params, None, None
@@ -168,9 +187,9 @@ def test_fit_waterfall_staged_runs_fast_search_then_final_consistent_fit(monkeyp
     )
 
     assert calls == [
-        ("fitIterated", False, 20),
-        ("fitIterated", True, 5),
-        ("Fit_QIntVsTemp", True, 4.0),
+        ("fitIterated", False, 20, "local"),
+        ("fitIterated", True, 5, "local"),
+        ("Fit_QIntVsTemp", True, 4.0, "local"),
     ]
     fit_params, init_fig, fitted_fig = result
     assert fit_params["delta_QP0"].value == 5.0
@@ -185,7 +204,7 @@ def test_fitIterated_final_refit_handles_makePlot_false(monkeypatch):
     def fake_uniform(_lower, _upper):
         return 1.0
 
-    def fake_fit(device, params, consistent=False, makePlot=True):
+    def fake_fit(device, params, consistent=False, makePlot=True, inner_solver="local"):
         fit_params = params.copy()
         if makePlot:
             return fit_params, None, None
@@ -290,4 +309,91 @@ def test_qint_vs_temp_consistent_uses_local_seeded_solver(monkeypatch):
     assert calls == [
         (0.1, 5e9, 1e-12, 2e4, 100.0, True),
         (0.2, 5.1e9, 2e-12, 2e4, 200.0, True),
+    ]
+
+
+def test_qint_vs_temp_consistent_can_use_fast_solver(monkeypatch):
+    calls = []
+
+    def fake_solve(params, temp, freq0, power, qc, qint_init, fitQP=True):
+        calls.append((temp, freq0, power, qc, qint_init, fitQP))
+        return qint_init + 2.0
+
+    monkeypatch.setattr("rrfit.waterfall._solve_consistent_qint", fake_solve)
+
+    result = QIntVsTemp_consistent(
+        [0.1, 0.2],
+        _make_params(),
+        [5e9, 5.1e9],
+        [1e-12, 2e-12],
+        2e4,
+        [100.0, 200.0],
+        inner_solver="fast",
+    )
+
+    assert np.array_equal(result, np.array([102.0, 202.0]))
+    assert calls == [
+        (0.1, 5e9, 1e-12, 2e4, 100.0, True),
+        (0.2, 5.1e9, 2e-12, 2e4, 200.0, True),
+    ]
+
+
+def test_qint_vs_temp_consistent_rejects_unknown_inner_solver():
+    with pytest.raises(ValueError, match="Unknown inner_solver"):
+        QIntVsTemp_consistent(
+            [0.1],
+            _make_params(),
+            [5e9],
+            [1e-12],
+            2e4,
+            [100.0],
+            inner_solver="mystery",
+        )
+
+
+def test_fit_waterfall_staged_propagates_fast_inner_solver(monkeypatch):
+    calls = []
+
+    def fake_fit_iterated(
+        device,
+        boundsDict,
+        numIter,
+        consistent=False,
+        makePlot=True,
+        fitQP=True,
+        retries=10,
+        init_params=None,
+        inner_solver="local",
+    ):
+        calls.append(("fitIterated", consistent, inner_solver))
+        device.best_params = init_params.copy()
+        return "search"
+
+    def fake_fit_qint(
+        device,
+        init_params,
+        consistent=False,
+        makePlot=True,
+        inner_solver="local",
+    ):
+        calls.append(("Fit_QIntVsTemp", consistent, inner_solver))
+        return init_params.copy(), None, None
+
+    monkeypatch.setattr("rrfit.waterfall.fitIterated", fake_fit_iterated)
+    monkeypatch.setattr("rrfit.waterfall.Fit_QIntVsTemp", fake_fit_qint)
+
+    fit_waterfall_staged(
+        Device(name="device"),
+        {"delta_QP0": (0.0, 5.0)},
+        coarse_iterations=1,
+        refine_iterations=1,
+        makePlot=False,
+        init_params=_make_params(),
+        inner_solver="fast",
+    )
+
+    assert calls == [
+        ("fitIterated", False, "fast"),
+        ("fitIterated", True, "fast"),
+        ("Fit_QIntVsTemp", True, "fast"),
     ]
