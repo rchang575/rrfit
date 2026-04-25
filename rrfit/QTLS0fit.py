@@ -10,6 +10,23 @@ from rrfit.fitfns import dBmtoW, nbarvsPin, Qivsnbar
 from rrfit.models import QivsnbarModel
 
 
+def _params_to_value_dict(params):
+    return dict(params.valuesdict())
+
+
+def _params_to_error_dict(params):
+    return {
+        name: (np.nan if param.stderr is None else param.stderr)
+        for name, param in params.items()
+    }
+
+
+def _store_qtls0_fit_summary(device, result):
+    device.qtls0_fit_result = result
+    device.qtls0_best_values = _params_to_value_dict(result.params)
+    device.qtls0_param_errors = _params_to_error_dict(result.params)
+
+
 def fit_qtls0(device: Device):
     traces = [tr for tr in device.traces if not tr.is_excluded]
     traces.sort(key=lambda x: x.power)
@@ -35,6 +52,8 @@ def fit_qtls0(device: Device):
 
     device.qtls0 = result.best_values["qtls0"]
     device.qtls0_err = result.params["qtls0"].stderr
+    device.best_params = result.params
+    _store_qtls0_fit_summary(device, result)
 
     fig, (res_ax, data_ax) = plt.subplots(2, 1, sharex=True, height_ratios=(1, 4))
     #fig.suptitle(f"Device '{device.name}' (pitch {device.pitch}um) QTLS0 from Qi vs nbar")

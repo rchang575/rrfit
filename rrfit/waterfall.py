@@ -67,8 +67,37 @@ def _normalize_waterfall_fit_result(result, makePlot):
     raise ValueError("Unexpected Fit_QIntVsTemp return shape")
 
 
+def _params_to_value_dict(params):
+    return dict(params.valuesdict())
+
+
+def _params_to_error_dict(params):
+    return {
+        name: (np.nan if param.stderr is None else param.stderr)
+        for name, param in params.items()
+    }
+
+
+def _store_waterfall_fit_summary(device, params):
+    device.waterfall_best_values = _params_to_value_dict(params)
+    device.waterfall_param_errors = _params_to_error_dict(params)
+
+
 def _safe_positive(value, floor=1e-12):
     return max(float(value), floor)
+
+
+def _nbar_from_qint(power, freq0, Qc, qint):
+    qint = _safe_positive(qint)
+    ql = 1 / (1 / qint + 1 / Qc)
+    return nbarvsPin(power, freq0, ql, Qc)
+
+
+def _nbar_from_inverse_qint(power, freq0, Qc, inv_qint):
+    inv_qint = _safe_positive(inv_qint)
+    inv_qc = 1 / Qc
+    prefactor = power / (h * np.pi * freq0**2)
+    return prefactor / (Qc * (inv_qint + inv_qc) ** 2)
 
 
 def _consistent_qint_residual(qint, outerParams, temp, freq0, power, Qc, fitQP=True):
@@ -81,8 +110,7 @@ def _consistent_qint_residual(qint, outerParams, temp, freq0, power, Qc, fitQP=T
     beta2 = outerParams['beta2']
 
     qint = _safe_positive(qint)
-    Ql = 1 / (1 / qint + 1 / Qc)
-    nbar = nbarvsPin(power, freq0, Ql, Qc)
+    nbar = _nbar_from_qint(power, freq0, Qc, qint)
 
     QPQ = QPQFunc(temp, delta_QP0, tc, freq0)
     QTLS = QTLSFunc(nbar, Q_TLS0, beta, beta2, D, freq0, temp)
@@ -92,6 +120,36 @@ def _consistent_qint_residual(qint, outerParams, temp, freq0, power, Qc, fitQP=T
         oneOverQ = 1 / QTLS + 1 / Q_other
     q_model = 1 / oneOverQ
     return q_model - qint
+
+
+def _consistent_inverse_qint_residual(
+    inv_qint,
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    fitQP=True,
+):
+    delta_QP0 = outerParams['delta_QP0']
+    Q_TLS0 = outerParams['Q_TLS0']
+    D = outerParams['D_0']
+    tc = outerParams['tc']
+    Q_other = outerParams['Q_other']
+    beta = outerParams['beta']
+    beta2 = outerParams['beta2']
+
+    inv_qint = _safe_positive(inv_qint)
+    nbar = _nbar_from_inverse_qint(power, freq0, Qc, inv_qint)
+
+    inv_qpq = 1 / QPQFunc(temp, delta_QP0, tc, freq0)
+    inv_qtls = 1 / QTLSFunc(nbar, Q_TLS0, beta, beta2, D, freq0, temp)
+    inv_qother = 1 / Q_other
+    if fitQP:
+        model_inv_q = inv_qpq + inv_qtls + inv_qother
+    else:
+        model_inv_q = inv_qtls + inv_qother
+    return model_inv_q - inv_qint
 
 
 def _solve_consistent_qint(
@@ -144,6 +202,93 @@ def _solve_consistent_qint(
     return _safe_positive(min_result.x)
 
 
+def _solve_consistent_qint_reduced(
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    fitQP=True,
+):
+    inv_qint_init = 1 / _safe_positive(qint_init)
+
+    def residual(inv_qint):
+        return _consistent_inverse_qint_residual(
+            inv_qint,
+            outerParams,
+            temp,
+            freq0,
+            power,
+            Qc,
+            fitQP=fitQP,
+        )
+
+    lower = _safe_positive(min(inv_qint_init / 10, 1e-12))
+    upper = max(inv_qint_init * 10, lower * 10)
+    f_lower = residual(lower)
+    f_upper = residual(upper)
+
+    for _ in range(12):
+        if np.sign(f_lower) != np.sign(f_upper):
+            break
+        upper *= 10
+        f_upper = residual(upper)
+    else:
+        return _solve_consistent_qint(
+            outerParams,
+            temp,
+            freq0,
+            power,
+            Qc,
+            qint_init,
+            fitQP=fitQP,
+        )
+
+    root_result = optimize.root_scalar(
+        residual,
+        bracket=(lower, upper),
+        method="brentq",
+        maxiter=100,
+    )
+    if not root_result.converged or not np.isfinite(root_result.root):
+        raise ValueError("reduced consistent Qint solver failed to converge")
+    return 1 / _safe_positive(root_result.root)
+
+
+def _solve_consistent_qint_dispatch(
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    fitQP=True,
+    consistent_method="qint",
+):
+    if consistent_method == "qint":
+        return _solve_consistent_qint(
+            outerParams,
+            temp,
+            freq0,
+            power,
+            Qc,
+            qint_init,
+            fitQP=fitQP,
+        )
+    if consistent_method == "inverse_qint":
+        return _solve_consistent_qint_reduced(
+            outerParams,
+            temp,
+            freq0,
+            power,
+            Qc,
+            qint_init,
+            fitQP=fitQP,
+        )
+    raise ValueError(f"Unknown consistent_method: {consistent_method}")
+
+
 def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
     return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
 
@@ -163,6 +308,7 @@ def predict_qint_consistent_curve(
     power,
     Qc,
     qint_init,
+    consistent_method="qint",
     max_refinement_passes=6,
     tail_convergence_tol=1e-3,
 ):
@@ -170,7 +316,15 @@ def predict_qint_consistent_curve(
     attempts = max(1, max_refinement_passes)
 
     for _ in range(attempts):
-        prediction = QIntVsTemp_consistent(temp, params, freq0, power, Qc, prediction)
+        prediction = QIntVsTemp_consistent(
+            temp,
+            params,
+            freq0,
+            power,
+            Qc,
+            prediction,
+            consistent_method=consistent_method,
+        )
         if not _consistent_tail_needs_refinement(prediction, tail_convergence_tol):
             break
 
@@ -192,6 +346,138 @@ def make_local_bounds(boundsDict, params, shrink=0.25):
     return local_bounds
 
 
+def _build_params_from_vector(base_params, param_names, values):
+    params = base_params.copy()
+    for name, value in zip(param_names, values):
+        params[name].value = value
+    return params
+
+
+def _waterfall_global_objective(
+    values,
+    base_params,
+    param_names,
+    tempArray,
+    freq0Array,
+    devPowerArray_W,
+    Qc,
+    QIntArray,
+    QIntErrArray,
+    consistent=True,
+    consistent_method="qint",
+):
+    params = _build_params_from_vector(base_params, param_names, values)
+    if consistent:
+        resid = QIntVsTemp_consistent_error_function(
+            params,
+            tempArray,
+            freq0Array,
+            devPowerArray_W,
+            Qc,
+            QIntArray,
+            QIntArray,
+            QIntErrArray,
+            consistent_method,
+        )
+    else:
+        ql = 1 / (1 / QIntArray + 1 / Qc)
+        nbarArray = nbarvsPin(devPowerArray_W, freq0Array, ql, Qc)
+        resid = QIntVsTemp_TLS_QP_Beta_error_function_usingParams(
+            params,
+            tempArray,
+            QIntArray,
+            freq0Array,
+            nbarArray,
+            0,
+            QIntErrArray,
+        )
+    resid = np.asarray(resid, dtype=float)
+    return float(np.dot(resid, resid))
+
+
+def fit_waterfall_global(
+    device,
+    boundsDict,
+    init_params=None,
+    consistent=True,
+    consistent_method="qint",
+    makePlot=True,
+    maxiter=40,
+    popsize=10,
+    tol=0.01,
+    polish=False,
+    seed=None,
+):
+    """
+    Experimental waterfall fit:
+    1. optimize the chosen objective globally over the physical parameters
+    2. run the existing local Fit_QIntVsTemp refinement from that best point
+
+    This preserves the legacy/staged workflows while providing a more principled
+    initializer than repeated uniform random restarts.
+    """
+    if init_params is None:
+        init_params = _default_waterfall_params()
+
+    arrays = _get_waterfall_arrays(device)
+    param_names = list(boundsDict.keys())
+    bounds = [tuple(boundsDict[name]) for name in param_names]
+
+    de_result = optimize.differential_evolution(
+        _waterfall_global_objective,
+        bounds=bounds,
+        args=(
+            init_params.copy(),
+            param_names,
+            arrays["temperature"],
+            arrays["freq0"],
+            arrays["power_watts"],
+            arrays["qc"],
+            arrays["qint"],
+            arrays["qint_err"],
+            consistent,
+            consistent_method,
+        ),
+        maxiter=maxiter,
+        popsize=popsize,
+        tol=tol,
+        polish=polish,
+        seed=seed,
+        init="latinhypercube",
+    )
+
+    seeded_params = _build_params_from_vector(init_params, param_names, de_result.x)
+    device.waterfall_global_result = de_result
+    device.best_params = seeded_params.copy()
+
+    if makePlot:
+        fit_params, initFig, fittedFig = _normalize_waterfall_fit_result(
+            Fit_QIntVsTemp(
+                device,
+                seeded_params,
+                consistent=consistent,
+                consistent_method=consistent_method,
+                makePlot=True,
+            ),
+            makePlot=True,
+        )
+    else:
+        fit_params, _ = _normalize_waterfall_fit_result(
+            Fit_QIntVsTemp(
+                device,
+                seeded_params,
+                consistent=consistent,
+                consistent_method=consistent_method,
+                makePlot=False,
+            ),
+            makePlot=False,
+        )
+        initFig = None
+        fittedFig = None
+    device.best_params = fit_params
+    return fit_params, initFig, fittedFig
+
+
 def QTLSFunc(nbar, qtls0, beta_1, beta_2, D, fr, temp):
     tanh_term = np.tanh((h * fr) / (2 * k * temp))
     sqrt_term = np.sqrt(1 + (np.power(nbar, beta_2) / (D * np.power(temp, beta_1))) * tanh_term)
@@ -210,28 +496,53 @@ def consistentQintError(params, outerParams, temp, freq0, power, Qc, fitQP = Tru
     ) ** 2
 
 
-def QIntVsTemp_consistent(temp, params, freq0, power, Qc, Qint_init):
+def QIntVsTemp_consistent(
+    temp,
+    params,
+    freq0,
+    power,
+    Qc,
+    Qint_init,
+    consistent_method="qint",
+):
     QInt = np.zeros(np.size(power))
     for i, currentPower in enumerate(power):
-        QInt[i] = _solve_consistent_qint(
+        QInt[i] = _solve_consistent_qint_dispatch(
             params,
             temp[i],
             freq0[i],
             currentPower,
             Qc,
             Qint_init[i],
+            consistent_method=consistent_method,
         )
     return QInt
 
 
-def QIntVsTemp_consistent_error_function(params, temps, freq0, power, Qc, Qint_init, data, errors):
+def QIntVsTemp_consistent_error_function(
+    params,
+    temps,
+    freq0,
+    power,
+    Qc,
+    Qint_init,
+    data,
+    errors,
+    consistent_method="qint",
+):
     resid = []
 
     for i in range(len(temps)):
         res = (
             data[i]
             - QIntVsTemp_consistent(
-                [temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]]
+                [temps[i]],
+                params,
+                [freq0[i]],
+                [power[i]],
+                Qc,
+                [Qint_init[i]],
+                consistent_method=consistent_method,
             )[0]
         ) / errors[i]
         #res = (data[i] - QIntVsTemp_consistent([temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]])[0])
@@ -282,7 +593,13 @@ def QIntVsTemp_TLS_QP_Beta_error_function_usingParams(params, temps, data, freq0
         resid.append(val)
     return np.hstack(resid)
 
-def plot_Qi_vs_temp(device: Device, figsize =(12, 8), plotParams = None, fitFunc=QIntVsTemp_consistent):
+def plot_Qi_vs_temp(
+    device: Device,
+    figsize=(12, 8),
+    plotParams=None,
+    fitFunc=QIntVsTemp_consistent,
+    consistent_method="qint",
+):
     """ """
     
     traces = _active_traces(device)
@@ -324,6 +641,7 @@ def plot_Qi_vs_temp(device: Device, figsize =(12, 8), plotParams = None, fitFunc
                     np.ones(np.size(tempAxis)) * devPowerArray_W[0],
                     Qc,
                     QIntInterp,
+                    consistent_method=consistent_method,
                 )
 
                 # plot the final data
@@ -598,7 +916,13 @@ def createFitHistograms(device, initDict, finalDict, boundsDict, red_chi2, probC
     plt.suptitle('Counts*prob histograms')
     return chi2Fig, countFig, probFig
 
-def Fit_QIntVsTemp(device, init_params, consistent=False, makePlot=True):
+def Fit_QIntVsTemp(
+    device,
+    init_params,
+    consistent=False,
+    consistent_method="qint",
+    makePlot=True,
+):
     # rewritten from scratch by Russell, Sept 7, 2022
     # there is a separate set of calls to deal with the case when the QInt calculation is done in a self-consistent
     # manner using fitFunc=QIntVsTemp_consistent, errorFunc=QIntVsTemp_consistent_error_function. That's the only
@@ -625,7 +949,16 @@ def Fit_QIntVsTemp(device, init_params, consistent=False, makePlot=True):
     if consistent:
         print("Starting consistent fit...")
         out_main = minimize(QIntVsTemp_consistent_error_function, init_params, \
-                args=(tempArray, freq0Array, devPowerArray_W, Qc, QIntArray, QIntArray, QIntErrArray),
+                args=(
+                    tempArray,
+                    freq0Array,
+                    devPowerArray_W,
+                    Qc,
+                    QIntArray,
+                    QIntArray,
+                    QIntErrArray,
+                    consistent_method,
+                ),
                 method="least_squares")
         print("Done consistent fit")
         #if out_main.params['Q_other'].stderr is None:
@@ -644,6 +977,7 @@ def Fit_QIntVsTemp(device, init_params, consistent=False, makePlot=True):
     fit_params = out_main.params
     final_red_chi2 = out_main.redchi
     device.waterfall_fit_result = out_main
+    _store_waterfall_fit_summary(device, fit_params)
 
     #### plot
     if makePlot:
@@ -653,7 +987,12 @@ def Fit_QIntVsTemp(device, init_params, consistent=False, makePlot=True):
             fitFunc = QIntVsTemp_TLS_QP_Beta_fit_usingParams
         initFig = None #initFig, ax = plot_Qi_vs_temp(device, fitFunc=fitFunc, plotParams=init_params)
         #ax.set_title('Init params, ' + device.name)
-        fittedFig, ax = plot_Qi_vs_temp(device, fitFunc=fitFunc, plotParams=out_main.params)
+        fittedFig, ax = plot_Qi_vs_temp(
+            device,
+            fitFunc=fitFunc,
+            plotParams=out_main.params,
+            consistent_method=consistent_method,
+        )
         #ax.set_title('Fitted params, ' + device.name)
         # Print out fit parameters:
         report_fit(out_main)
