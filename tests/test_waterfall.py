@@ -12,6 +12,7 @@ from rrfit.waterfall import (
     fitIterated,
     fit_waterfall_staged,
     predict_qint_consistent_curve,
+    QIntVsTemp_consistent,
 )
 
 
@@ -266,3 +267,27 @@ def test_solve_consistent_qint_falls_back_to_bounded_minimizer(monkeypatch):
 
     assert qint == 24.0
 
+
+def test_qint_vs_temp_consistent_uses_local_seeded_solver(monkeypatch):
+    calls = []
+
+    def fake_solve(params, temp, freq0, power, qc, qint_init, fitQP=True):
+        calls.append((temp, freq0, power, qc, qint_init, fitQP))
+        return qint_init + 1.0
+
+    monkeypatch.setattr("rrfit.waterfall._solve_consistent_qint_local", fake_solve)
+
+    result = QIntVsTemp_consistent(
+        [0.1, 0.2],
+        _make_params(),
+        [5e9, 5.1e9],
+        [1e-12, 2e-12],
+        2e4,
+        [100.0, 200.0],
+    )
+
+    assert np.array_equal(result, np.array([101.0, 201.0]))
+    assert calls == [
+        (0.1, 5e9, 1e-12, 2e4, 100.0, True),
+        (0.2, 5.1e9, 2e-12, 2e4, 200.0, True),
+    ]

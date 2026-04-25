@@ -176,6 +176,28 @@ def _solve_consistent_qint(
     return _safe_positive(min_result.x)
 
 
+def _solve_consistent_qint_local(
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    fitQP=True,
+):
+    qint_init = _safe_positive(qint_init)
+    qint_param = Parameters()
+    qint_param.add("Qint", value=qint_init, min=qint_init / 50)
+
+    out = minimize(
+        consistentQintError,
+        params=qint_param,
+        args=(outerParams, temp, freq0, power, Qc, fitQP),
+        method="least_squares",
+    )
+    return out.params["Qint"].value
+
+
 def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
     return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
 
@@ -252,7 +274,7 @@ def QIntVsTemp_consistent(
 ):
     QInt = np.zeros(np.size(power))
     for i, currentPower in enumerate(power):
-        QInt[i] = _solve_consistent_qint(
+        QInt[i] = _solve_consistent_qint_local(
             params,
             temp[i],
             freq0[i],
