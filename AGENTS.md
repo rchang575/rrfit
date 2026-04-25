@@ -43,3 +43,15 @@
 - Fix reliability issues in `rrfit/dataio.py` defaults and loading behavior.
 - Remove unintended input mutation in `rrfit/hangerfit.py`.
 - Improve README usage examples once tests exist.
+
+## Waterfall Fitting Note
+
+- The main `waterfall.py` workflow is a two-stage process:
+  - use `fitIterated(...)` to search for good initial parameters across many random seeds
+  - then run `Fit_QIntVsTemp(device, device.best_params, consistent=True)` for the final fit
+- The final `consistent=True` call is scientifically important and should not be treated as optional post-processing.
+- Reason: the modeled independent variable `nbar` depends on `Ql`, and `Ql` depends on the fitted `Qint`.
+- In the non-consistent branch, `nbar` is treated as fixed from the measured data.
+- In the consistent branch, the code solves a self-consistent fixed-point problem for each point so that the `Qint` used to compute `nbar` matches the `Qint` predicted by the model.
+- This self-consistent branch is what produces the smooth interpolated fitted curve used in the intended analysis workflow.
+- Be careful not to refactor the `consistent=True` path into the simpler fixed-`nbar` path unless that behavior change is explicitly intended and validated.

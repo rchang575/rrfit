@@ -9,6 +9,95 @@ from rrfit.fitfns import nbarvsPin, dBmtoW
 import random
 import matplotlib.cm as cm
 
+
+def _default_waterfall_params():
+    params = Parameters()
+    params.add('delta_QP0', value=2e-4, min=0)
+    params.add('Q_TLS0', value=1e6, min=0)
+    params.add('tc', value=2.0, min=0.0, max=4.5)
+    params.add('Q_other', value=1e7, min=0)
+    params.add('beta', value=1, min=0, max=2.0)
+    params.add('beta2', value=1, min=0, max=2.0)
+    params.add('D_0', value=100, min=0)
+    return params
+
+
+def _active_traces(device: Device):
+    return [tr for tr in device.traces if not tr.is_excluded]
+
+
+def _get_waterfall_arrays(device: Device):
+    traces = _active_traces(device)
+    line_attenuation = getattr(device, "line_attenuation", 0)
+
+    devPowerArray_W = np.array([dBmtoW(tr.power - line_attenuation) for tr in traces])
+    tempArray = np.array([tr.temperature for tr in traces])
+    freq0Array = np.array([tr.fr for tr in traces])
+    QIntArray = np.array([tr.Qi for tr in traces])
+    QIntErrArray = np.array([tr.Qi_err for tr in traces])
+    Qc = np.mean(np.array([tr.absQc for tr in traces]))
+    Ql = np.array([tr.Ql for tr in traces])
+
+    return {
+        "traces": traces,
+        "power_watts": devPowerArray_W,
+        "temperature": tempArray,
+        "freq0": freq0Array,
+        "qint": QIntArray,
+        "qint_err": QIntErrArray,
+        "qc": Qc,
+        "ql": Ql,
+    }
+
+
+def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
+    return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
+
+
+def _consistent_tail_needs_refinement(qint_values, tail_convergence_tol=1e-3):
+    if len(qint_values) < 2:
+        return False
+    if qint_values[-2] == 0:
+        return False
+    return abs(qint_values[-1] / qint_values[-2] - 1) < tail_convergence_tol
+
+
+def predict_qint_consistent_curve(
+    temp,
+    params,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    max_refinement_passes=6,
+    tail_convergence_tol=1e-3,
+):
+    prediction = np.asarray(qint_init, dtype=float)
+    attempts = max(1, max_refinement_passes)
+
+    for _ in range(attempts):
+        prediction = QIntVsTemp_consistent(temp, params, freq0, power, Qc, prediction)
+        if not _consistent_tail_needs_refinement(prediction, tail_convergence_tol):
+            break
+
+    return prediction
+
+
+def make_local_bounds(boundsDict, params, shrink=0.25):
+    local_bounds = {}
+    for param, (lower, upper) in boundsDict.items():
+        span = upper - lower
+        half_window = 0.5 * span * shrink
+        center = params[param].value
+        local_lower = max(lower, center - half_window)
+        local_upper = min(upper, center + half_window)
+        if local_lower == local_upper:
+            local_lower = lower
+            local_upper = upper
+        local_bounds[param] = (local_lower, local_upper)
+    return local_bounds
+
+
 def QTLSFunc(nbar, qtls0, beta_1, beta_2, D, fr, temp):
     tanh_term = np.tanh((h * fr) / (2 * k * temp))
     sqrt_term = np.sqrt(1 + (np.power(nbar, beta_2) / (D * np.power(temp, beta_1))) * tanh_term)
@@ -62,7 +151,12 @@ def QIntVsTemp_consistent_error_function(params, temps, freq0, power, Qc, Qint_i
     resid = []
 
     for i in range(len(temps)):
-        res = (data[i] - QIntVsTemp_consistent([temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]])[0]) / errors[i]
+        res = (
+            data[i]
+            - QIntVsTemp_consistent(
+                [temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]]
+            )[0]
+        ) / errors[i]
         #res = (data[i] - QIntVsTemp_consistent([temps[i]], params, [freq0[i]], [power[i]], Qc, [Qint_init[i]])[0])
         #print(f"{res}")
         resid.append(res)
@@ -101,7 +195,12 @@ def QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID, z
 def QIntVsTemp_TLS_QP_Beta_error_function_usingParams(params, temps, data, freq0, nbarLis, powerIDs, errors):
     resid = []
     for i in range(len(temps)):
-        val = (data[i] - QIntVsTemp_TLS_QP_Beta_fit_usingParams(temps[i], params, freq0[i], nbarLis[i], powerIDs)) / errors[i]
+        val = (
+            data[i]
+            - QIntVsTemp_TLS_QP_Beta_fit_usingParams(
+                temps[i], params, freq0[i], nbarLis[i], powerIDs
+            )
+        ) / errors[i]
         #val = (data[i] - QIntVsTemp_TLS_QP_Beta_fit_usingParams(temps[i], params, freq0[i], nbarLis[i], powerIDs))
         resid.append(val)
     return np.hstack(resid)
@@ -109,7 +208,7 @@ def QIntVsTemp_TLS_QP_Beta_error_function_usingParams(params, temps, data, freq0
 def plot_Qi_vs_temp(device: Device, figsize =(12, 8), plotParams = None, fitFunc=QIntVsTemp_consistent):
     """ """
     
-    traces = [tr for tr in device.traces if not tr.is_excluded]
+    traces = _active_traces(device)
     min_temp = min([tr.temperature for tr in traces])
     max_temp = max([tr.temperature for tr in traces])
     data = defaultdict(list)
@@ -139,48 +238,24 @@ def plot_Qi_vs_temp(device: Device, figsize =(12, 8), plotParams = None, fitFunc
         if not plotParams is None:
             if fitFunc == QIntVsTemp_consistent:
                 tempAxis = np.linspace(min_temp, max_temp, 100)
-                ##################################################
-                ### interpolation functions for freq0 and Qint ###
-                # Qint interpolation is just for an initial guess to the consistent fitting algorithm
-                # the interpolated freq0 data is actually used in the final curve
-                
-
-                #tempList = tempArray[matchingInds]
-                #freq0List = freq0Array[matchingInds]
-                #QIntList = QIntArray[matchingInds]
-
-                    #sortInds = np.argsort(tempList)
-
-                    #tempList = tempList[sortInds]
-                    #freq0List = freq0List[sortInds]
-                    #QIntList = QIntList[sortInds]
-
                 freq0Interp = np.interp(tempAxis, temp, freq0List)
                 QIntInterp = np.interp(tempAxis, temp, Qi)
-                    ##################################################
+                ys = predict_qint_consistent_curve(
+                    tempAxis,
+                    plotParams,
+                    freq0Interp,
+                    np.ones(np.size(tempAxis)) * devPowerArray_W[0],
+                    Qc,
+                    QIntInterp,
+                )
 
-                ys = fitFunc(tempAxis, plotParams, freq0Interp,
-                            np.ones(np.size(tempAxis)) * devPowerArray_W[0],
-                            Qc, QIntInterp)
-                                      
-                # if the last data point is very similar to the second last data point, we may have a case where the
-                # initial guess from interp was way off. Run a few more iterations to see if it gets better
-                count = 0
-                while abs(ys[-1]/ys[-2]-1) < 0.001:
-                    if count == 5:
-                        break
-                    ys = fitFunc(tempAxis, plotParams, freq0Interp,
-                                 np.ones(np.size(tempAxis)) * devPowerArray_W[0],
-                                 Qc, ys)
-                        
                 # plot the final data
                 ax.plot(tempAxis * 1e3, ys, label='{0:.1f} dBm'.format(power),
                         color=color, linewidth=2)
             else:
                 # calculate the nbar array from data
                 nbarArray = nbarvsPin(devPowerArray_W, freq0List, Ql, Qc)
-                ys = fitFunc(temp, plotParams, freq0List,
-                             nbarArray, 0)
+                ys = predict_qint_from_fixed_nbar(temp, plotParams, freq0List, nbarArray, 0)
                 ax.plot(temp * 1e3, ys, label='{0:.1f} dBm'.format(power),
                         color=color, linewidth=2)
             
@@ -241,14 +316,7 @@ def plot_Qi_vs_temp(device: Device, figsize =(12, 8), plotParams = None, fitFunc
 def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fitQP=True, retries = 10, init_params=None):
 
     if init_params is None:
-        init_params = Parameters()
-        init_params.add('delta_QP0', value=2e-4, min=0)
-        init_params.add('Q_TLS0', value=1e6, min=0)
-        init_params.add('tc', value=2.0, min=0.0, max=4.5)
-        init_params.add('Q_other', value=1e7, min=0)
-        init_params.add('beta', value=1, min=0, max=2.0)
-        init_params.add('beta2', value=1, min=0, max=2.0)
-        init_params.add('D_0', value=100, min=0)
+        init_params = _default_waterfall_params()
     setattr(device, "best_params", init_params.copy())
 
     # initialize output variables
@@ -258,6 +326,8 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
         initDict[param] = np.zeros(numIter)
         finalDict[param] = np.zeros(numIter)
     red_chi2_arr = np.zeros(numIter)
+    best_fit_params = None
+    best_red_chi2 = np.inf
     # run the fits in a loop
     for i in range(numIter):
         print(f"Running iteration {i+1}/{numIter}...")
@@ -281,6 +351,9 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
                 for param in boundsDict.keys():
                     finalDict[param][i] = params[param].value
                 red_chi2_arr[i] = red_chi2
+                if red_chi2 < best_red_chi2:
+                    best_red_chi2 = red_chi2
+                    best_fit_params = params.copy()
                 check = False
             except ValueError as err:
                 retry_count += 1
@@ -296,12 +369,71 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
         countFig = None
         probFig = None
     # save the best fit in the hanger object
-    bestInd = red_chi2_arr.argmin()
-    for param in init_params.keys():
-        device.best_params[param].value = initDict[param][bestInd]
+    if best_fit_params is None:
+        raise RuntimeError("fitIterated did not complete a successful fit")
+    device.best_params = best_fit_params.copy()
     final_fit_params, initFig, fittedFig = Fit_QIntVsTemp(device, device.best_params, consistent=consistent, makePlot=makePlot)
     device.best_params = final_fit_params
     return initDict, finalDict, red_chi2_arr, [chi2Fig, countFig, probFig, initFig, fittedFig]
+
+
+def fit_waterfall_staged(
+    device,
+    boundsDict,
+    coarse_iterations=30,
+    refine_iterations=0,
+    local_shrink=0.25,
+    makePlot=True,
+    retries=10,
+    init_params=None,
+):
+    """
+    Faster waterfall workflow:
+    1. broad non-consistent random search to find a good basin cheaply
+    2. optional narrow consistent search around the coarse best fit
+    3. final consistent fit for the trusted result
+    """
+    if init_params is None:
+        init_params = _default_waterfall_params()
+
+    coarse_result = fitIterated(
+        device,
+        boundsDict,
+        coarse_iterations,
+        consistent=False,
+        makePlot=False,
+        retries=retries,
+        init_params=init_params.copy(),
+    )
+    coarse_best_params = device.best_params.copy()
+
+    refine_result = None
+    if refine_iterations > 0:
+        refine_bounds = make_local_bounds(boundsDict, coarse_best_params, shrink=local_shrink)
+        refine_result = fitIterated(
+            device,
+            refine_bounds,
+            refine_iterations,
+            consistent=True,
+            makePlot=False,
+            retries=retries,
+            init_params=coarse_best_params.copy(),
+        )
+
+    final_fit_params, initFig, fittedFig = Fit_QIntVsTemp(
+        device,
+        device.best_params.copy(),
+        consistent=True,
+        makePlot=makePlot,
+    )
+    device.best_params = final_fit_params
+
+    return {
+        "coarse_search": coarse_result,
+        "consistent_refine": refine_result,
+        "final_params": final_fit_params,
+        "figures": [initFig, fittedFig],
+    }
 
 # inputs are taken from the fitIterated function except for:
 #   probCutoff - probability cutoff for chi2 values. If a fit has a probability lower than probCutoff of being
@@ -367,20 +499,14 @@ def Fit_QIntVsTemp(device, init_params, consistent=False, makePlot=True):
     #   makePlot - boolean that sets whether plots are generated
     # find arrays of things for later
     
-    traces = [tr for tr in device.traces if not tr.is_excluded]
-
-    line_attenuation = getattr(device, "line_attenuation", 0)
-
-    devPowerArray_W = np.array([dBmtoW(tr.power - line_attenuation) for tr in traces])
-    tempArray = np.array([tr.temperature for tr in traces])
-    freq0Array = np.array([tr.fr for tr in traces])
-
-    QIntArray = np.array([tr.Qi for tr in traces])
-    QIntErrArray = np.array([tr.Qi_err for tr in traces])
-
-    Qc = np.mean(np.array([tr.absQc for tr in traces]))
-    avgphi = np.mean(np.array([tr.phi for tr in traces]))
-    Ql = np.array([tr.Ql for tr in traces])
+    arrays = _get_waterfall_arrays(device)
+    tempArray = arrays["temperature"]
+    freq0Array = arrays["freq0"]
+    devPowerArray_W = arrays["power_watts"]
+    QIntArray = arrays["qint"]
+    QIntErrArray = arrays["qint_err"]
+    Qc = arrays["qc"]
+    Ql = arrays["ql"]
 
     # calculate the nbar array for use in the fit
     nbarArray = nbarvsPin(devPowerArray_W, freq0Array, Ql, Qc)
