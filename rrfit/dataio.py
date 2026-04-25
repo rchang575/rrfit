@@ -1,43 +1,46 @@
 """ """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
+
 import h5py
+import numpy as np
 
 
 @dataclass
 class Trace:
-    id: int = None
-    device_name: str = None
-    frequency: list[float] = None
-    s21real: list[float] = None
-    s21imag: list[float] = None
-    power: float = None
-    temperature: float = None
-    temperature_err: float = None
-    background_amp: float = None
-    background_phase: float = None
-    tau: float = None
-    fr: float = None
-    fr_err: float = None
-    Qi: float = None
-    Qi_err: float = None
-    Ql: float = None
-    Ql_err: float = None
-    absQc: float = None
-    absQc_err: float = None
-    phi: float = None
-    phi_err: float = None
-    is_excluded: bool = None
-    is_homophasal: bool = None
+    id: Optional[int] = None
+    device_name: Optional[str] = None
+    frequency: Optional[np.ndarray] = None
+    s21real: Optional[np.ndarray] = None
+    s21imag: Optional[np.ndarray] = None
+    power: Optional[float] = None
+    temperature: Optional[float] = None
+    temperature_err: Optional[float] = None
+    background_amp: Optional[float] = None
+    background_phase: Optional[float] = None
+    tau: Optional[float] = None
+    fr: Optional[float] = None
+    fr_err: Optional[float] = None
+    Qi: Optional[float] = None
+    Qi_err: Optional[float] = None
+    Ql: Optional[float] = None
+    Ql_err: Optional[float] = None
+    absQc: Optional[float] = None
+    absQc_err: Optional[float] = None
+    phi: Optional[float] = None
+    phi_err: Optional[float] = None
+    is_excluded: Optional[bool] = None
+    is_homophasal: Optional[bool] = None
 
 
 @dataclass
 class Device:
-    name: str = None
-    pitch: float = None
-    traces: list[Trace] = None
-    line_attenuation: float = None
+    name: Optional[str] = None
+    pitch: Optional[float] = None
+    traces: list[Trace] = field(default_factory=list)
+    line_attenuation: Optional[float] = None
 
 
 def load_data(*folders: Path, **devices: Device):
