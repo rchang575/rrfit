@@ -129,5 +129,41 @@ def test_fit_waterfall_staged_runs_fast_search_then_final_consistent_fit(monkeyp
         ("fitIterated", True, 5),
         ("Fit_QIntVsTemp", True, 4.0),
     ]
-    assert result["final_params"]["delta_QP0"].value == 5.0
+    fit_params, init_fig, fitted_fig = result
+    assert fit_params["delta_QP0"].value == 5.0
+    assert init_fig is None
+    assert fitted_fig is None
     assert device.best_params["delta_QP0"].value == 5.0
+    assert device.waterfall_staged_result["coarse_search"] == "search"
+    assert device.waterfall_staged_result["consistent_refine"] == "search"
+
+
+def test_fitIterated_final_refit_handles_makePlot_false(monkeypatch):
+    def fake_uniform(_lower, _upper):
+        return 1.0
+
+    def fake_fit(device, params, consistent=False, makePlot=True):
+        fit_params = params.copy()
+        if makePlot:
+            return fit_params, None, None
+        return fit_params, 0.25
+
+    monkeypatch.setattr("rrfit.waterfall.random.uniform", fake_uniform)
+    monkeypatch.setattr("rrfit.waterfall.Fit_QIntVsTemp", fake_fit)
+
+    device = Device(name="device")
+    bounds = {"delta_QP0": (0.0, 5.0)}
+
+    init_dict, final_dict, red_chi2, figures = fitIterated(
+        device,
+        bounds,
+        numIter=1,
+        consistent=False,
+        makePlot=False,
+        init_params=_make_params(),
+    )
+
+    assert init_dict["delta_QP0"][0] == 1.0
+    assert final_dict["delta_QP0"][0] == 1.0
+    assert red_chi2[0] == 0.25
+    assert figures == [None, None, None, None, None]

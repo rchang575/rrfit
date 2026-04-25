@@ -50,6 +50,22 @@ def _get_waterfall_arrays(device: Device):
     }
 
 
+def _normalize_waterfall_fit_result(result, makePlot):
+    if makePlot:
+        fit_params, initFig, fittedFig = result
+        return fit_params, initFig, fittedFig
+
+    if len(result) == 2:
+        fit_params, red_chi2 = result
+        return fit_params, red_chi2
+
+    if len(result) == 3:
+        fit_params, _initFig, _fittedFig = result
+        return fit_params, None
+
+    raise ValueError("Unexpected Fit_QIntVsTemp return shape")
+
+
 def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
     return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
 
@@ -347,7 +363,15 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
                     #init_params[param].min = boundsDict[param][0]
                     #init_params[param].max = boundsDict[param][1]
                 #print(f"Outside minimize: {[(p.name, p.value) for p in init_params.values()]}")
-                params, red_chi2 = Fit_QIntVsTemp(device, init_params, consistent=consistent, makePlot=False)  # run the fit!
+                params, red_chi2 = _normalize_waterfall_fit_result(
+                    Fit_QIntVsTemp(
+                        device,
+                        init_params,
+                        consistent=consistent,
+                        makePlot=False,
+                    ),
+                    makePlot=False,
+                )
                 for param in boundsDict.keys():
                     finalDict[param][i] = params[param].value
                 red_chi2_arr[i] = red_chi2
@@ -372,7 +396,28 @@ def fitIterated(device, boundsDict, numIter, consistent=False, makePlot=True, fi
     if best_fit_params is None:
         raise RuntimeError("fitIterated did not complete a successful fit")
     device.best_params = best_fit_params.copy()
-    final_fit_params, initFig, fittedFig = Fit_QIntVsTemp(device, device.best_params, consistent=consistent, makePlot=makePlot)
+    if makePlot:
+        final_fit_params, initFig, fittedFig = _normalize_waterfall_fit_result(
+            Fit_QIntVsTemp(
+                device,
+                device.best_params,
+                consistent=consistent,
+                makePlot=True,
+            ),
+            makePlot=True,
+        )
+    else:
+        final_fit_params, _ = _normalize_waterfall_fit_result(
+            Fit_QIntVsTemp(
+                device,
+                device.best_params,
+                consistent=consistent,
+                makePlot=False,
+            ),
+            makePlot=False,
+        )
+        initFig = None
+        fittedFig = None
     device.best_params = final_fit_params
     return initDict, finalDict, red_chi2_arr, [chi2Fig, countFig, probFig, initFig, fittedFig]
 
@@ -392,6 +437,10 @@ def fit_waterfall_staged(
     1. broad non-consistent random search to find a good basin cheaply
     2. optional narrow consistent search around the coarse best fit
     3. final consistent fit for the trusted result
+
+    This mirrors the final-call pattern of Fit_QIntVsTemp:
+    fit_params, initFig, fittedFig = fit_waterfall_staged(...)
+    device.best_params = fit_params
     """
     if init_params is None:
         init_params = _default_waterfall_params()
@@ -420,6 +469,11 @@ def fit_waterfall_staged(
             init_params=coarse_best_params.copy(),
         )
 
+    device.waterfall_staged_result = {
+        "coarse_search": coarse_result,
+        "consistent_refine": refine_result,
+    }
+
     final_fit_params, initFig, fittedFig = Fit_QIntVsTemp(
         device,
         device.best_params.copy(),
@@ -428,12 +482,7 @@ def fit_waterfall_staged(
     )
     device.best_params = final_fit_params
 
-    return {
-        "coarse_search": coarse_result,
-        "consistent_refine": refine_result,
-        "final_params": final_fit_params,
-        "figures": [initFig, fittedFig],
-    }
+    return final_fit_params, initFig, fittedFig
 
 # inputs are taken from the fitIterated function except for:
 #   probCutoff - probability cutoff for chi2 values. If a fit has a probability lower than probCutoff of being
