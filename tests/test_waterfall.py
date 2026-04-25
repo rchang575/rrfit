@@ -1,9 +1,11 @@
 from collections import deque
 
 from lmfit import Parameters
+import numpy as np
 
 from rrfit.dataio import Device
 from rrfit.waterfall import (
+    _solve_consistent_qint,
     fitIterated,
     fit_waterfall_staged,
     predict_qint_consistent_curve,
@@ -167,3 +169,59 @@ def test_fitIterated_final_refit_handles_makePlot_false(monkeypatch):
     assert final_dict["delta_QP0"][0] == 1.0
     assert red_chi2[0] == 0.25
     assert figures == [None, None, None, None, None]
+
+
+def test_solve_consistent_qint_prefers_fast_root_solver(monkeypatch):
+    calls = []
+
+    class RootResult:
+        converged = True
+        root = 42.0
+
+    def fake_root_scalar(fn, method, x0, x1, maxiter):
+        calls.append((method, x0, x1, maxiter, fn(42.0)))
+        return RootResult()
+
+    monkeypatch.setattr("rrfit.waterfall.optimize.root_scalar", fake_root_scalar)
+
+    qint = _solve_consistent_qint(
+        _make_params(delta_qp0=1e-6, q_tls0=1e6),
+        temp=0.1,
+        freq0=5e9,
+        power=1e-12,
+        Qc=2e4,
+        qint_init=1e5,
+    )
+
+    assert qint == 42.0
+    assert calls[0][0] == "secant"
+
+
+def test_solve_consistent_qint_falls_back_to_bounded_minimizer(monkeypatch):
+    class RootFailure:
+        converged = False
+        root = np.nan
+
+    class MinResult:
+        success = True
+        x = 24.0
+
+    monkeypatch.setattr(
+        "rrfit.waterfall.optimize.root_scalar",
+        lambda *args, **kwargs: RootFailure(),
+    )
+    monkeypatch.setattr(
+        "rrfit.waterfall.optimize.minimize_scalar",
+        lambda *args, **kwargs: MinResult(),
+    )
+
+    qint = _solve_consistent_qint(
+        _make_params(delta_qp0=1e-6, q_tls0=1e6),
+        temp=0.1,
+        freq0=5e9,
+        power=1e-12,
+        Qc=2e4,
+        qint_init=1e5,
+    )
+
+    assert qint == 24.0

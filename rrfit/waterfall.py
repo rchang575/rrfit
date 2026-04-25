@@ -1,5 +1,6 @@
 from scipy.constants import h, k
 from scipy.special import kn
+from scipy import optimize
 from lmfit import Parameters, minimize, report_fit
 from rrfit.dataio import Device
 from collections import defaultdict
@@ -66,6 +67,83 @@ def _normalize_waterfall_fit_result(result, makePlot):
     raise ValueError("Unexpected Fit_QIntVsTemp return shape")
 
 
+def _safe_positive(value, floor=1e-12):
+    return max(float(value), floor)
+
+
+def _consistent_qint_residual(qint, outerParams, temp, freq0, power, Qc, fitQP=True):
+    delta_QP0 = outerParams['delta_QP0']
+    Q_TLS0 = outerParams['Q_TLS0']
+    D = outerParams['D_0']
+    tc = outerParams['tc']
+    Q_other = outerParams['Q_other']
+    beta = outerParams['beta']
+    beta2 = outerParams['beta2']
+
+    qint = _safe_positive(qint)
+    Ql = 1 / (1 / qint + 1 / Qc)
+    nbar = nbarvsPin(power, freq0, Ql, Qc)
+
+    QPQ = QPQFunc(temp, delta_QP0, tc, freq0)
+    QTLS = QTLSFunc(nbar, Q_TLS0, beta, beta2, D, freq0, temp)
+    if fitQP:
+        oneOverQ = 1 / QPQ + 1 / QTLS + 1 / Q_other
+    else:
+        oneOverQ = 1 / QTLS + 1 / Q_other
+    q_model = 1 / oneOverQ
+    return q_model - qint
+
+
+def _solve_consistent_qint(
+    outerParams,
+    temp,
+    freq0,
+    power,
+    Qc,
+    qint_init,
+    fitQP=True,
+):
+    qint_init = _safe_positive(qint_init)
+
+    def residual(qint):
+        return _consistent_qint_residual(
+            qint, outerParams, temp, freq0, power, Qc, fitQP=fitQP
+        )
+
+    # Try a fast derivative-free secant solve first.
+    try:
+        qint_next = max(qint_init * 1.05, qint_init + 1e-9)
+        root_result = optimize.root_scalar(
+            residual,
+            method="secant",
+            x0=qint_init,
+            x1=qint_next,
+            maxiter=50,
+        )
+        if root_result.converged and np.isfinite(root_result.root):
+            return _safe_positive(root_result.root)
+    except (RuntimeError, ValueError, OverflowError, FloatingPointError):
+        pass
+
+    # Fall back to minimizing the squared residual over a wide positive interval.
+    upper_bound = max(
+        qint_init * 100,
+        float(outerParams["Q_other"]) * 10,
+        float(outerParams["Q_TLS0"]) * 10,
+        1.0,
+    )
+    lower_bound = max(min(qint_init / 100, upper_bound / 1e6), 1e-12)
+    min_result = optimize.minimize_scalar(
+        lambda qint: residual(qint) ** 2,
+        bounds=(lower_bound, upper_bound),
+        method="bounded",
+        options={"maxiter": 100},
+    )
+    if not min_result.success or not np.isfinite(min_result.x):
+        raise ValueError("consistent Qint solver failed to converge")
+    return _safe_positive(min_result.x)
+
+
 def predict_qint_from_fixed_nbar(temp, params, freq0, nbar, powerID=0):
     return QIntVsTemp_TLS_QP_Beta_fit_usingParams(temp, params, freq0, nbar, powerID)
 
@@ -126,40 +204,23 @@ def QPQFunc(tempK, delta_QP0, tc, fr):
 
 # error function to solve the transcendental equation for Q_int
 def consistentQintError(params, outerParams, temp, freq0, power, Qc, fitQP = True):
-    delta_QP0 = outerParams['delta_QP0']
-    Q_TLS0    = outerParams['Q_TLS0']
-    D         = outerParams['D_0']
-    tc        = outerParams['tc']
-    Q_other   = outerParams['Q_other']
-    beta      = outerParams['beta']
-    beta2     = outerParams['beta2']
-
-    Qint = params['Qint']
-
-    Ql = 1 / (1/Qint + 1/Qc)
-    nbar = nbarvsPin(power, freq0, Ql, Qc)
-
-    QPQ = QPQFunc(temp, delta_QP0, tc, freq0)
-    QTLS = QTLSFunc(nbar, Q_TLS0, beta, beta2, D, freq0, temp)
-    if fitQP:
-        oneOverQ = 1/QPQ + 1/QTLS + 1/Q_other
-    else:
-        oneOverQ = 1/QTLS + 1/Q_other
-    Q = 1/oneOverQ
-    #print(f"1: {(Q-Qint) ** 2}")
-    return (Q-Qint)**2
+    qint = params['Qint']
+    return _consistent_qint_residual(
+        qint, outerParams, temp, freq0, power, Qc, fitQP=fitQP
+    ) ** 2
 
 
 def QIntVsTemp_consistent(temp, params, freq0, power, Qc, Qint_init):
-
     QInt = np.zeros(np.size(power))
     for i, currentPower in enumerate(power):
-        QintParam = Parameters()
-        QintParam.add('Qint', value=Qint_init[i], min=Qint_init[i]/50)
-
-        out = minimize(consistentQintError, params=QintParam, args=(params, temp[i], freq0[i], currentPower, Qc), method="least_squares")
-
-        QInt[i] = out.params['Qint'].value
+        QInt[i] = _solve_consistent_qint(
+            params,
+            temp[i],
+            freq0[i],
+            currentPower,
+            Qc,
+            qint_init[i],
+        )
     return QInt
 
 
