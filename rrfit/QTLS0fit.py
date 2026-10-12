@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from rrfit.dataio import Device
 from rrfit.fitfns import dBmtoW, nbarvsPin, Qivsnbar
 from rrfit.models import QivsnbarModel
+from rrfit.waterfall import _get_device_line_attenuation
 
 
 def _params_to_value_dict(params):
@@ -38,7 +39,7 @@ def fit_qtls0(device: Device, weighted: bool = True):
     """
     traces = [tr for tr in device.traces if not tr.is_excluded]
     traces.sort(key=lambda x: x.power)
-    line_attenuation = getattr(device, "attenuation", 0)
+    line_attenuation = _get_device_line_attenuation(device)
 
     pow_W = np.array([dBmtoW(tr.power - line_attenuation) for tr in traces])
     fr = np.array([tr.fr for tr in traces])

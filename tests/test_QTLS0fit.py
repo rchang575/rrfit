@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from lmfit import Parameters
 
 from rrfit.QTLS0fit import _store_qtls0_fit_summary
@@ -91,3 +92,61 @@ def test_fit_qtls0_weighted_rejects_missing_errors():
 
     with pytest.raises(ValueError, match="positive Qi_err"):
         fit_qtls0(device)
+
+
+def _fit_quietly(device):
+    import contextlib
+    import io
+
+    from rrfit.QTLS0fit import fit_qtls0
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        fit_qtls0(device)
+    return device
+
+
+def test_fit_qtls0_uses_device_line_attenuation():
+    from rrfit.fitfns import dBmtoW, nbarvsPin
+
+    device = _make_qtls0_device(np.full(9, 0.01))
+    attenuation = device.attenuation
+    del device.attenuation
+    device.line_attenuation = attenuation
+
+    _fit_quietly(device)
+
+    traces = sorted(device.traces, key=lambda tr: tr.power)
+    expected_nbar = nbarvsPin(
+        np.array([dBmtoW(tr.power - attenuation) for tr in traces]),
+        np.mean([tr.fr for tr in traces]),
+        np.array([tr.Ql for tr in traces]),
+        np.mean([tr.absQc for tr in traces]),
+    )
+    np.testing.assert_allclose(device.qtls0_fit_result.userkws["x"], expected_nbar)
+
+
+def test_fit_qtls0_line_attenuation_matches_legacy_attenuation_and_rescales_nc():
+    legacy = _fit_quietly(_make_qtls0_device(np.full(9, 0.01)))
+
+    modern = _make_qtls0_device(np.full(9, 0.01))
+    modern.line_attenuation = modern.attenuation
+    del modern.attenuation
+    _fit_quietly(modern)
+
+    unattenuated = _make_qtls0_device(np.full(9, 0.01))
+    del unattenuated.attenuation
+    _fit_quietly(unattenuated)
+
+    np.testing.assert_allclose(
+        modern.qtls0_fit_result.userkws["x"], legacy.qtls0_fit_result.userkws["x"]
+    )
+    assert modern.qtls0 == pytest.approx(legacy.qtls0, rel=1e-9)
+    # Ignoring 40 dB of attenuation inflates nbar, and so nc, by 1e4; qtls0 is unaffected.
+    np.testing.assert_allclose(
+        unattenuated.qtls0_fit_result.userkws["x"],
+        1e4 * modern.qtls0_fit_result.userkws["x"],
+    )
+    assert unattenuated.qtls0 == pytest.approx(modern.qtls0, rel=1e-3)
+    assert unattenuated.qtls0_best_values["nc"] == pytest.approx(
+        1e4 * modern.qtls0_best_values["nc"], rel=1e-3
+    )
