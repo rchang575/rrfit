@@ -27,7 +27,14 @@ def _store_qtls0_fit_summary(device, result):
     device.qtls0_param_errors = _params_to_error_dict(result.params)
 
 
-def fit_qtls0(device: Device):
+def fit_qtls0(device: Device, weighted: bool = False):
+    """Fit Qi vs nbar at base temperature to extract QTLS0.
+
+    Args:
+        device: device whose non-excluded traces are fitted.
+        weighted: if True, weight residuals by ``1 / Qi_err``. Defaults to False,
+            which keeps the historical unweighted fit.
+    """
     traces = [tr for tr in device.traces if not tr.is_excluded]
     traces.sort(key=lambda x: x.power)
     line_attenuation = getattr(device, "attenuation", 0)
@@ -47,7 +54,16 @@ def fit_qtls0(device: Device):
     
     nbar = nbarvsPin(pow_W, fr_avg, Ql, avgQc)
 
-    result = QivsnbarModel(fr=fr_avg, temp=temp_avg).fit(Qi, nbar)
+    fit_kwargs = {}
+    if weighted:
+        Qi_err = np.asarray(Qi_err, dtype=float)
+        if not np.all(np.isfinite(Qi_err) & (Qi_err > 0)):
+            raise ValueError(
+                "fit_qtls0(weighted=True) requires finite, positive Qi_err for every "
+                "non-excluded trace"
+            )
+        fit_kwargs["weights"] = 1 / Qi_err
+    result = QivsnbarModel(fr=fr_avg, temp=temp_avg).fit(Qi, nbar, **fit_kwargs)
     print(result.fit_report())
 
     device.qtls0 = result.best_values["qtls0"]

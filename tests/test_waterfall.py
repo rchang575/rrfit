@@ -397,3 +397,196 @@ def test_fit_waterfall_staged_propagates_fast_inner_solver(monkeypatch):
         ("fitIterated", True, "fast"),
         ("Fit_QIntVsTemp", True, "fast"),
     ]
+
+
+def test_fitIterated_raises_chained_error_after_retries(monkeypatch):
+    def failing_fit(device, params, consistent=False, makePlot=True, inner_solver="local"):
+        raise ValueError("NaN in residual")
+
+    monkeypatch.setattr("rrfit.waterfall.Fit_QIntVsTemp", failing_fit)
+
+    with pytest.raises(RuntimeError, match="exceeded retries=3") as excinfo:
+        fitIterated(
+            Device(name="device"),
+            {"delta_QP0": (0.0, 5.0)},
+            numIter=2,
+            makePlot=False,
+            retries=3,
+            init_params=_make_params(),
+        )
+
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "NaN in residual" in str(excinfo.value)
+
+
+def _histogram_inputs(nfree):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from types import SimpleNamespace
+    from rrfit.waterfall import createFitHistograms
+
+    device = Device(name="device")
+    device.waterfall_fit_result = SimpleNamespace(nfree=nfree)
+    names = ["delta_QP0", "Q_TLS0", "tc", "Q_other", "beta", "beta2", "D_0"]
+    bounds = {name: (0.0, 1.0) for name in names}
+    init = {name: np.linspace(0.1, 0.9, 5) for name in names}
+    final = {name: np.linspace(0.2, 0.8, 5) for name in names}
+    red_chi2 = np.array([1.0, 1.01, 1.02, 5.0, 50.0])
+    return createFitHistograms, device, init, final, bounds, red_chi2
+
+
+@pytest.mark.parametrize("nfree", [0, -1])
+def test_createFitHistograms_skips_when_no_degrees_of_freedom(nfree):
+    createFitHistograms, device, init, final, bounds, red_chi2 = _histogram_inputs(nfree)
+
+    with pytest.warns(RuntimeWarning, match="nfree"):
+        figs = createFitHistograms(device, init, final, bounds, red_chi2)
+
+    assert figs == (None, None, None)
+
+
+def test_createFitHistograms_still_plots_when_well_posed():
+    import matplotlib.pyplot as plt
+
+    createFitHistograms, device, init, final, bounds, red_chi2 = _histogram_inputs(10)
+
+    figs = createFitHistograms(device, init, final, bounds, red_chi2)
+
+    assert all(fig is not None for fig in figs)
+    plt.close("all")
+
+
+def test_fitIterated_with_plots_completes_when_no_degrees_of_freedom(monkeypatch):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from types import SimpleNamespace
+
+    def fake_fit(device, params, consistent=False, makePlot=True, inner_solver="local"):
+        device.waterfall_fit_result = SimpleNamespace(nfree=0)
+        if makePlot:
+            return params.copy(), None, None
+        return params.copy(), 1.0
+
+    monkeypatch.setattr("rrfit.waterfall.Fit_QIntVsTemp", fake_fit)
+    bounds = {name: (0.5, 1.5) for name in _make_params().keys()}
+
+    with pytest.warns(RuntimeWarning, match="nfree"):
+        result = fitIterated(
+            Device(name="device"), bounds, numIter=2, makePlot=True,
+            init_params=_make_params(),
+        )
+
+    init_dict, final_dict, red_chi2, figures = result
+    assert figures[:3] == [None, None, None]
+
+
+# Parameters and trace values from a real fit where the plotted -40 dBm curve
+# (data only at 100 mK) collapsed onto the local solver's qint_init/50 floor
+# below ~35 mK.
+_LOW_T_DROP_PARAMS = dict(
+    delta_QP0=4.994485263184948e-05,
+    Q_TLS0=22181720.416532505,
+    tc=0.1309261452687087,
+    Q_other=59008618.884217545,
+    beta=6.03677456049002e-16,
+    beta2=1.9999999999999998,
+    D_0=356.12166734157006,
+)
+_LOW_T_DROP_TRACE = dict(fr=4652943848.8096075, Qi=412123.99565669073, absQc=1452963.6851049897)
+
+
+def _low_t_drop_params():
+    params = Parameters()
+    for name, value in _LOW_T_DROP_PARAMS.items():
+        params.add(name, value=value)
+    return params
+
+
+def _relative_residual(qint, params, temp, freq0, power, qc):
+    from rrfit.waterfall import _consistent_qint_residual
+
+    return abs(_consistent_qint_residual(qint, params, temp, freq0, power, qc)) / qint
+
+
+def test_consistent_curve_continuation_tracks_root_far_from_single_data_point():
+    params = _low_t_drop_params()
+    temp_axis = np.linspace(0.0099843125, 0.10002033333333334, 30)
+    fr, qi, qc = (_LOW_T_DROP_TRACE[key] for key in ("fr", "Qi", "absQc"))
+    freq0 = np.full(temp_axis.size, fr)
+    power = np.full(temp_axis.size, dBmtoW(-40.0 - 80.0))
+    seeds = np.full(temp_axis.size, qi)
+
+    seeded = predict_qint_consistent_curve(temp_axis, params, freq0, power, qc, seeds)
+    continued = predict_qint_consistent_curve(
+        temp_axis, params, freq0, power, qc, seeds, anchor_temps=[0.099895]
+    )
+
+    # Old behaviour (kept when anchor_temps is not given): stuck on the floor at low T.
+    assert seeded[0] == pytest.approx(qi / 50, rel=1e-3)
+    # Continuation lands on a true self-consistent root everywhere.
+    for t, q in zip(temp_axis, continued):
+        assert _relative_residual(q, params, t, fr, power[0], qc) < 1e-6
+    assert continued[0] > 5e7
+    # Q decreases monotonically with T for these parameters: no vertical drop.
+    assert np.all(np.diff(continued) < 0)
+    # Near the measured point the curve is unchanged.
+    assert continued[-1] == pytest.approx(seeded[-1], rel=1e-6)
+
+
+def test_consistent_curve_continuation_matches_seeded_curve_inside_data_range():
+    params = _low_t_drop_params()
+    fr, qc = _LOW_T_DROP_TRACE["fr"], _LOW_T_DROP_TRACE["absQc"]
+    data_temps = np.array([0.04, 0.06, 0.08, 0.1])
+    power_w = dBmtoW(-40.0 - 80.0)
+    from rrfit.waterfall import _solve_consistent_qint
+
+    data_qi = np.array(
+        [_solve_consistent_qint(params, t, fr, power_w, qc, 1e6) for t in data_temps]
+    )
+    temp_axis = np.linspace(0.01, 0.1, 25)
+    seeds = np.interp(temp_axis, data_temps, data_qi)
+    freq0 = np.full(temp_axis.size, fr)
+    power = np.full(temp_axis.size, power_w)
+
+    seeded = predict_qint_consistent_curve(temp_axis, params, freq0, power, qc, seeds)
+    continued = predict_qint_consistent_curve(
+        temp_axis, params, freq0, power, qc, seeds, anchor_temps=data_temps
+    )
+
+    inside = temp_axis >= data_temps.min()
+    np.testing.assert_array_equal(continued[inside], seeded[inside])
+
+
+def test_plot_Qi_vs_temp_curve_has_no_low_temperature_drop():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from rrfit.dataio import Trace
+    from rrfit.waterfall import plot_Qi_vs_temp
+
+    fr, qi, qc = (_LOW_T_DROP_TRACE[key] for key in ("fr", "Qi", "absQc"))
+
+    def trace(power, temperature, qi):
+        return Trace(
+            power=power, temperature=temperature, fr=fr, Qi=qi, Qi_err=0.01 * qi,
+            Ql=1 / (1 / qi + 1 / qc), absQc=qc, is_excluded=False,
+        )
+
+    # -40 dBm is measured only at 100 mK; -80 dBm sets the 10 mK end of the axis.
+    device = Device(
+        name="device",
+        traces=[trace(-40.0, 0.099895, qi), trace(-80.0, 0.0099843125, 5e6),
+                trace(-80.0, 0.10002033333333334, 4e5)],
+        line_attenuation=80.0,
+    )
+
+    fig, ax = plot_Qi_vs_temp(device, plotParams=_low_t_drop_params())
+
+    curve = next(line for line in ax.get_lines() if line.get_label() == "-40.0 dBm")
+    ys = curve.get_ydata()
+    assert ys.min() > 1e5
+    assert np.all(np.diff(ys) < 0)
+    plt.close(fig)

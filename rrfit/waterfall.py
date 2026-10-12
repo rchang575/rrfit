@@ -231,6 +231,59 @@ def _consistent_tail_needs_refinement(qint_values, tail_convergence_tol=1e-3):
     return abs(qint_values[-1] / qint_values[-2] - 1) < tail_convergence_tol
 
 
+def _anchor_index_range(temp, anchor_temps):
+    """Indices ``(lo, hi)`` of ``temp`` covered by the span of ``anchor_temps``.
+
+    If no grid point lies inside the span (e.g. a single anchor temperature that
+    is not on the grid), both indices point at the grid point nearest to it.
+    """
+    temp = np.asarray(temp, dtype=float)
+    anchor_temps = np.asarray(anchor_temps, dtype=float)
+    inside = np.where((temp >= anchor_temps.min()) & (temp <= anchor_temps.max()))[0]
+    if inside.size:
+        return int(inside[0]), int(inside[-1])
+    nearest = int(np.argmin(np.abs(temp - np.mean(anchor_temps))))
+    return nearest, nearest
+
+
+def QIntVsTemp_consistent_continuation(
+    temp,
+    params,
+    freq0,
+    power,
+    Qc,
+    Qint_init,
+    anchor_temps,
+    inner_solver="local",
+):
+    """Self-consistent Qint along a temperature grid, by numerical continuation.
+
+    ``temp`` must be sorted ascending. Grid points within the span of
+    ``anchor_temps`` (the measured temperatures) are solved from ``Qint_init``
+    exactly as in ``QIntVsTemp_consistent``. Points outside that span are solved
+    by walking outward from its edges, seeding each point with the solution at
+    its neighbour. This keeps the solver on the physical branch far from the
+    data, where a seed copied from the nearest measurement can be orders of
+    magnitude off.
+    """
+    temp = np.asarray(temp, dtype=float)
+    QInt = np.zeros(np.size(temp))
+    lo, hi = _anchor_index_range(temp, anchor_temps)
+
+    def solve(i, seed):
+        return _solve_consistent_qint_with_method(
+            params, temp[i], freq0[i], power[i], Qc, seed, inner_solver=inner_solver
+        )
+
+    for i in range(lo, hi + 1):
+        QInt[i] = solve(i, Qint_init[i])
+    for i in range(lo - 1, -1, -1):
+        QInt[i] = solve(i, QInt[i + 1])
+    for i in range(hi + 1, len(temp)):
+        QInt[i] = solve(i, QInt[i - 1])
+    return QInt
+
+
 def predict_qint_consistent_curve(
     temp,
     params,
@@ -241,9 +294,34 @@ def predict_qint_consistent_curve(
     max_refinement_passes=6,
     tail_convergence_tol=1e-3,
     inner_solver="local",
+    anchor_temps=None,
 ):
+    """Predict a smooth self-consistent Qint curve on the grid ``temp``.
+
+    If ``anchor_temps`` (the measured temperatures for this power) is given,
+    the first pass uses ``QIntVsTemp_consistent_continuation`` so that grid
+    points outside the measured range are seeded from their neighbours rather
+    than from ``qint_init``. ``temp`` must then be sorted ascending.
+    """
     prediction = np.asarray(qint_init, dtype=float)
     attempts = max(1, max_refinement_passes)
+
+    if anchor_temps is not None:
+        prediction = QIntVsTemp_consistent_continuation(
+            temp,
+            params,
+            freq0,
+            power,
+            Qc,
+            prediction,
+            anchor_temps,
+            inner_solver=inner_solver,
+        )
+        attempts -= 1
+        if attempts == 0 or not _consistent_tail_needs_refinement(
+            prediction, tail_convergence_tol
+        ):
+            return prediction
 
     for _ in range(attempts):
         prediction = QIntVsTemp_consistent(
@@ -441,6 +519,7 @@ def plot_Qi_vs_temp(
                     Qc,
                     QIntInterp,
                     inner_solver=inner_solver,
+                    anchor_temps=temp,
                 )
 
                 # plot the final data
@@ -571,8 +650,11 @@ def fitIterated(
             except ValueError as err:
                 retry_count += 1
                 if retry_count >= retries:
-                    print(f"Fit aborted! Exceeded {retries = } for {err = }")
-                    return
+                    raise RuntimeError(
+                        f"fitIterated aborted on iteration {i+1}/{numIter}: "
+                        f"exceeded retries={retries} after repeated ValueErrors; "
+                        f"last error: {err!r}"
+                    ) from err
             #    pass
     # create summary plots, if requested
     if makePlot:
@@ -685,12 +767,36 @@ def fit_waterfall_staged(
 #                up plotting some terrible fits that make the visualization break. We only want to look at fits that
 #                are reasonably good
 def createFitHistograms(device, initDict, finalDict, boundsDict, red_chi2, probCutoff=0.1):
-    plt.rcParams['font.size'] = 12
+    """Plot chi2 and parameter histograms for the results of ``fitIterated``.
+
+    Returns ``(chi2Fig, countFig, probFig)``. If the fit has no degrees of freedom
+    (``nfree <= 0``) or no iteration passes ``probCutoff``, the chi2-based
+    probabilities are undefined, so a ``RuntimeWarning`` is issued and
+    ``(None, None, None)`` is returned instead of raising.
+    """
+    import warnings
     import scipy.stats as stats
     nfree = device.waterfall_fit_result.nfree
+    if nfree <= 0:
+        warnings.warn(
+            f"createFitHistograms: fit has nfree={nfree} degrees of freedom "
+            "(more varying parameters than data points); skipping histograms.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None, None, None
+    plt.rcParams['font.size'] = 12
     prob = stats.chi2.pdf(red_chi2 / min(red_chi2) * nfree, nfree) / \
            stats.chi2.pdf(nfree, nfree)  # normalized probability to best result
     indsToKeep = np.where(prob > probCutoff)[0]  # indices where the probability is greater than probCutoff
+    if len(indsToKeep) == 0:
+        warnings.warn(
+            "createFitHistograms: no iterations passed probCutoff "
+            f"({probCutoff}); skipping histograms.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None, None, None
     # histogram of chi2 values
     chi2Fig, hax = plt.subplots(1, 1, figsize=(4.5, 4.5), dpi=150)
     hax.hist(red_chi2[indsToKeep], 30, alpha=0.7)
