@@ -60,26 +60,26 @@ def _make_qtls0_device(qi_err_scale):
     return device
 
 
-def test_fit_qtls0_default_is_unweighted_and_weighted_is_opt_in():
+def test_fit_qtls0_weights_by_qi_err_by_default():
     from rrfit.QTLS0fit import fit_qtls0
 
     # Errors differ wildly between points, so weighting must change the fit.
     scale = np.array([1e-3, 0.5, 1e-3, 0.5, 1e-3, 0.5, 1e-3, 0.5, 1e-3])
-    unweighted_default = _make_qtls0_device(scale)
-    unweighted_explicit = _make_qtls0_device(scale)
-    weighted = _make_qtls0_device(scale)
+    weighted_default = _make_qtls0_device(scale)
+    weighted_explicit = _make_qtls0_device(scale)
+    unweighted = _make_qtls0_device(scale)
 
-    fit_qtls0(unweighted_default)
-    fit_qtls0(unweighted_explicit, weighted=False)
-    fit_qtls0(weighted, weighted=True)
+    fit_qtls0(weighted_default)
+    fit_qtls0(weighted_explicit, weighted=True)
+    fit_qtls0(unweighted, weighted=False)
 
-    assert unweighted_default.qtls0_fit_result.weights is None
-    assert unweighted_default.qtls0 == unweighted_explicit.qtls0
     np.testing.assert_allclose(
-        weighted.qtls0_fit_result.weights,
-        1 / np.array([tr.Qi_err for tr in sorted(weighted.traces, key=lambda t: t.power)]),
+        weighted_default.qtls0_fit_result.weights,
+        1 / np.array([tr.Qi_err for tr in sorted(weighted_default.traces, key=lambda t: t.power)]),
     )
-    assert weighted.qtls0 != unweighted_default.qtls0
+    assert weighted_default.qtls0 == weighted_explicit.qtls0
+    assert unweighted.qtls0_fit_result.weights is None
+    assert weighted_default.qtls0 != unweighted.qtls0
 
 
 def test_fit_qtls0_weighted_rejects_missing_errors():
@@ -90,4 +90,4 @@ def test_fit_qtls0_weighted_rejects_missing_errors():
     device.traces[3].Qi_err = 0.0
 
     with pytest.raises(ValueError, match="positive Qi_err"):
-        fit_qtls0(device, weighted=True)
+        fit_qtls0(device)

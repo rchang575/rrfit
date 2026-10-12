@@ -27,13 +27,14 @@ def _store_qtls0_fit_summary(device, result):
     device.qtls0_param_errors = _params_to_error_dict(result.params)
 
 
-def fit_qtls0(device: Device, weighted: bool = False):
+def fit_qtls0(device: Device, weighted: bool = True):
     """Fit Qi vs nbar at base temperature to extract QTLS0.
 
     Args:
         device: device whose non-excluded traces are fitted.
-        weighted: if True, weight residuals by ``1 / Qi_err``. Defaults to False,
-            which keeps the historical unweighted fit.
+        weighted: if True (default), weight residuals by ``1 / Qi_err``; every
+            non-excluded trace must then have a finite, positive ``Qi_err``.
+            Pass False for the historical unweighted fit.
     """
     traces = [tr for tr in device.traces if not tr.is_excluded]
     traces.sort(key=lambda x: x.power)
