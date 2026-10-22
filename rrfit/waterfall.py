@@ -7,6 +7,7 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 from rrfit.fitfns import nbarvsPin, dBmtoW
+from rrfit.losserr import loss_arrays, qi_errorbars_from_loss
 import random
 import matplotlib.cm as cm
 
@@ -60,6 +61,11 @@ def _get_waterfall_arrays(device: Device):
         "qc": Qc,
         "ql": Ql,
     }
+
+
+def _loss_space_kwargs(loss_space):
+    # Only forward ``loss_space`` when it is on, so default calls are unchanged.
+    return {"loss_space": True} if loss_space else {}
 
 
 def _normalize_waterfall_fit_result(result, makePlot):
@@ -469,14 +475,62 @@ def QIntVsTemp_TLS_QP_Beta_error_function_usingParams(params, temps, data, freq0
         resid.append(val)
     return np.hstack(resid)
 
+def QIntVsTemp_consistent_loss_error_function(
+    params,
+    temps,
+    freq0,
+    power,
+    Qc,
+    Qint_init,
+    loss,
+    errors,
+    inner_solver="local",
+):
+    """Loss-space version of ``QIntVsTemp_consistent_error_function``.
+
+    Residuals are ``(loss - 1/Qint_model) / errors`` with ``loss = 1/Qi`` data,
+    where ``Qint_model`` is the same self-consistent solution.
+    """
+    qint_model = np.array([
+        QIntVsTemp_consistent(
+            [temps[i]],
+            params,
+            [freq0[i]],
+            [power[i]],
+            Qc,
+            [Qint_init[i]],
+            inner_solver=inner_solver,
+        )[0]
+        for i in range(len(temps))
+    ])
+    return (np.asarray(loss) - 1 / qint_model) / np.asarray(errors)
+
+
+def QIntVsTemp_TLS_QP_Beta_loss_error_function_usingParams(
+    params, temps, loss, freq0, nbarLis, powerIDs, errors
+):
+    """Loss-space version of ``QIntVsTemp_TLS_QP_Beta_error_function_usingParams``
+    (fixed nbar): residuals are ``(loss - 1/Q_model) / errors``."""
+    q_model = np.array([
+        QIntVsTemp_TLS_QP_Beta_fit_usingParams(temps[i], params, freq0[i], nbarLis[i], powerIDs)
+        for i in range(len(temps))
+    ])
+    return (np.asarray(loss) - 1 / q_model) / np.asarray(errors)
+
+
 def plot_Qi_vs_temp(
     device: Device,
     figsize=(12, 8),
     plotParams=None,
     fitFunc=QIntVsTemp_consistent,
     inner_solver="local",
+    loss_space=False,
 ):
-    """ """
+    """Plot Qi vs temperature per power, with fitted curves if ``plotParams`` is given.
+
+    With ``loss_space=True`` the error bars are the asymmetric Qi interval
+    implied by ``1/Qi +/- loss_err`` instead of ``Qi_err``.
+    """
     
     traces = _active_traces(device)
     min_temp = min([tr.temperature for tr in traces])
@@ -496,6 +550,8 @@ def plot_Qi_vs_temp(
         temp = np.array([tr.temperature for tr in traces])
         Qi = np.array([tr.Qi for tr in traces])
         Qi_err = np.array([tr.Qi_err for tr in traces])
+        if loss_space:
+            Qi_err = qi_errorbars_from_loss(*loss_arrays(traces))
         Qc = np.mean(np.array([tr.absQc for tr in traces]))
         Ql = np.array([tr.Ql for tr in traces])
         freq0List = np.array([tr.fr for tr in traces])
@@ -596,7 +652,12 @@ def fitIterated(
     retries=10,
     init_params=None,
     inner_solver="local",
+    loss_space=False,
 ):
+    """Random-restart waterfall fit; see the comment block above.
+
+    ``loss_space=True`` is passed to every ``Fit_QIntVsTemp`` call.
+    """
 
     if init_params is None:
         init_params = _default_waterfall_params()
@@ -637,6 +698,7 @@ def fitIterated(
                         consistent=consistent,
                         makePlot=False,
                         inner_solver=inner_solver,
+                        **_loss_space_kwargs(loss_space),
                     ),
                     makePlot=False,
                 )
@@ -675,6 +737,7 @@ def fitIterated(
                 consistent=consistent,
                 makePlot=True,
                 inner_solver=inner_solver,
+                **_loss_space_kwargs(loss_space),
             ),
             makePlot=True,
         )
@@ -686,6 +749,7 @@ def fitIterated(
                 consistent=consistent,
                 makePlot=False,
                 inner_solver=inner_solver,
+                **_loss_space_kwargs(loss_space),
             ),
             makePlot=False,
         )
@@ -705,6 +769,7 @@ def fit_waterfall_staged(
     retries=10,
     init_params=None,
     inner_solver="local",
+    loss_space=False,
 ):
     """
     Faster waterfall workflow:
@@ -715,6 +780,8 @@ def fit_waterfall_staged(
     This mirrors the final-call pattern of Fit_QIntVsTemp:
     fit_params, initFig, fittedFig = fit_waterfall_staged(...)
     device.best_params = fit_params
+
+    ``loss_space=True`` is passed to every fit stage.
     """
     if init_params is None:
         init_params = _default_waterfall_params()
@@ -728,6 +795,7 @@ def fit_waterfall_staged(
         retries=retries,
         init_params=init_params.copy(),
         inner_solver=inner_solver,
+        **_loss_space_kwargs(loss_space),
     )
     coarse_best_params = device.best_params.copy()
 
@@ -743,6 +811,7 @@ def fit_waterfall_staged(
             retries=retries,
             init_params=coarse_best_params.copy(),
             inner_solver=inner_solver,
+            **_loss_space_kwargs(loss_space),
         )
 
     device.waterfall_staged_result = {
@@ -756,6 +825,7 @@ def fit_waterfall_staged(
         consistent=True,
         makePlot=makePlot,
         inner_solver=inner_solver,
+        **_loss_space_kwargs(loss_space),
     )
     device.best_params = final_fit_params
 
@@ -844,6 +914,7 @@ def Fit_QIntVsTemp(
     consistent=False,
     makePlot=True,
     inner_solver="local",
+    loss_space=False,
 ):
     # rewritten from scratch by Russell, Sept 7, 2022
     # there is a separate set of calls to deal with the case when the QInt calculation is done in a self-consistent
@@ -853,6 +924,8 @@ def Fit_QIntVsTemp(
     # inputs:
     #   consistent - boolean. Set to False to calculate nbar from data, True to calculate nbar and Q simultaneously
     #   makePlot - boolean that sets whether plots are generated
+    #   loss_space - boolean. Set to True to fit 1/Qi weighted by trace.loss_err (see rrfit.losserr) instead of
+    #                Qi weighted by Qi_err. The model and the consistent nbar solve are unchanged.
     # find arrays of things for later
     
     arrays = _get_waterfall_arrays(device)
@@ -868,7 +941,28 @@ def Fit_QIntVsTemp(
     nbarArray = nbarvsPin(devPowerArray_W, freq0Array, Ql, Qc)
 
     #### Fit
-    if consistent:
+    if loss_space:
+        lossArray, lossErrArray = loss_arrays(arrays["traces"])
+        if consistent:
+            print("Starting consistent fit...")
+            out_main = minimize(QIntVsTemp_consistent_loss_error_function, init_params,
+                    args=(
+                        tempArray,
+                        freq0Array,
+                        devPowerArray_W,
+                        Qc,
+                        QIntArray,
+                        lossArray,
+                        lossErrArray,
+                        inner_solver,
+                    ),
+                    method="least_squares")
+            print("Done consistent fit")
+        else:
+            out_main = minimize(QIntVsTemp_TLS_QP_Beta_loss_error_function_usingParams, init_params,
+                    args=(tempArray, lossArray, freq0Array, nbarArray, 0, lossErrArray),
+                    method="least_squares")
+    elif consistent:
         print("Starting consistent fit...")
         out_main = minimize(QIntVsTemp_consistent_error_function, init_params, \
                 args=(
@@ -914,6 +1008,7 @@ def Fit_QIntVsTemp(
             fitFunc=fitFunc,
             plotParams=out_main.params,
             inner_solver=inner_solver,
+            **_loss_space_kwargs(loss_space),
         )
         #ax.set_title('Fitted params, ' + device.name)
         # Print out fit parameters:

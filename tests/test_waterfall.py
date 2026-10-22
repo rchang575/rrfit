@@ -590,3 +590,120 @@ def test_plot_Qi_vs_temp_curve_has_no_low_temperature_drop():
     assert ys.min() > 1e5
     assert np.all(np.diff(ys) < 0)
     plt.close(fig)
+
+
+def _quiet(fn, *args, **kwargs):
+    import contextlib
+    import io
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        return fn(*args, **kwargs)
+
+
+def test_fit_qintvstemp_loss_space_requires_loss_errors():
+    from synthetic import overcoupled_waterfall_device, waterfall_params
+    from rrfit.waterfall import Fit_QIntVsTemp
+
+    with pytest.raises(ValueError, match="compute_loss_errors"):
+        Fit_QIntVsTemp(
+            overcoupled_waterfall_device(), waterfall_params(),
+            makePlot=False, loss_space=True,
+        )
+
+
+def test_fit_qintvstemp_loss_space_fixed_nbar_residuals_are_in_loss():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from synthetic import overcoupled_waterfall_device, waterfall_params
+    from rrfit.fitfns import nbarvsPin
+    from rrfit.losserr import compute_loss_errors
+    from rrfit.waterfall import Fit_QIntVsTemp, QIntVsTemp_TLS_QP_Beta_fit_usingParams
+
+    device = overcoupled_waterfall_device()
+    compute_loss_errors(device)
+
+    params, _init_fig, fitted_fig = _quiet(
+        Fit_QIntVsTemp, device, waterfall_params(Q_TLS0=2e7, tc=1.1), loss_space=True
+    )
+
+    arrays = _get_waterfall_arrays(device)
+    nbar = nbarvsPin(arrays["power_watts"], arrays["freq0"], arrays["ql"], arrays["qc"])
+    q_model = QIntVsTemp_TLS_QP_Beta_fit_usingParams(
+        arrays["temperature"], params, arrays["freq0"], nbar, 0
+    )
+    loss_err = np.array([tr.loss_err for tr in arrays["traces"]])
+    np.testing.assert_allclose(
+        device.waterfall_fit_result.residual,
+        (1 / arrays["qint"] - 1 / q_model) / loss_err,
+        rtol=1e-10,
+    )
+    assert fitted_fig is not None
+    plt.close("all")
+
+
+def test_fit_qintvstemp_loss_space_consistent_on_overcoupled_device():
+    import copy
+
+    from synthetic import WATERFALL_TRUE, overcoupled_waterfall_device, waterfall_params
+    from rrfit.losserr import compute_loss_errors
+    from rrfit.waterfall import Fit_QIntVsTemp
+
+    device = overcoupled_waterfall_device(seed=0)
+    compute_loss_errors(device)
+    default = copy.deepcopy(device)
+    init = waterfall_params(Q_TLS0=2e7, tc=1.1)
+
+    _quiet(Fit_QIntVsTemp, default, init.copy(), consistent=True, makePlot=False)
+    params, red_chi2 = _quiet(
+        Fit_QIntVsTemp, device, init.copy(), consistent=True, makePlot=False, loss_space=True
+    )
+
+    assert default.waterfall_fit_result.redchi > 100
+    assert red_chi2 < 3
+    for name in ("Q_TLS0", "Q_other", "tc"):
+        assert abs(params[name].value - WATERFALL_TRUE[name]) < 3 * params[name].stderr
+    assert set(device.waterfall_best_values) == set(default.waterfall_best_values)
+
+
+def _record_fit_calls(monkeypatch):
+    calls = []
+
+    def fake_fit(device, params, consistent=False, makePlot=True, inner_solver="local", **kwargs):
+        calls.append(kwargs)
+        if makePlot:
+            return params.copy(), None, None
+        return params.copy(), 1.0
+
+    monkeypatch.setattr("rrfit.waterfall.Fit_QIntVsTemp", fake_fit)
+    return calls
+
+
+@pytest.mark.parametrize("loss_space", [False, True])
+def test_fitIterated_forwards_loss_space_only_when_on(monkeypatch, loss_space):
+    calls = _record_fit_calls(monkeypatch)
+
+    fitIterated(
+        Device(name="device"), {"delta_QP0": (0.0, 1.0)}, numIter=2,
+        makePlot=False, init_params=_make_params(), loss_space=loss_space,
+    )
+
+    expected = {"loss_space": True} if loss_space else {}
+    assert len(calls) == 3
+    assert all(kwargs == expected for kwargs in calls)
+
+
+@pytest.mark.parametrize("loss_space", [False, True])
+def test_fit_waterfall_staged_forwards_loss_space_only_when_on(monkeypatch, loss_space):
+    calls = _record_fit_calls(monkeypatch)
+
+    fit_waterfall_staged(
+        Device(name="device"), {"delta_QP0": (0.0, 1.0)}, coarse_iterations=2,
+        refine_iterations=1, makePlot=True, init_params=_make_params(),
+        loss_space=loss_space,
+    )
+
+    expected = {"loss_space": True} if loss_space else {}
+    assert len(calls) == 3 + 2 + 1
+    assert all(kwargs == expected for kwargs in calls)

@@ -114,7 +114,7 @@ def test_default_fit_outputs_match_golden(case):
     _assert_matches(json.loads(json.dumps(_run(case))), expected)
 
 
-@pytest.mark.parametrize("case", [c for c in CASES if c.startswith("qtls0")])
+@pytest.mark.parametrize("case", list(CASES))
 def test_explicit_loss_space_false_matches_golden(case):
     expected = json.loads(GOLDEN.read_text())[case]
     _assert_matches(json.loads(json.dumps(_run(case, loss_space=False))), expected)
