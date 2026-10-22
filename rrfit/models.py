@@ -9,6 +9,7 @@ from rrfit.fitfns import (
     centered_phase,
     rr_s21_hanger,
     Qivsnbar,
+    lossvsnbar,
 )
 
 
@@ -209,3 +210,17 @@ class QivsnbarModel(FitModel):
             "temp": {"value": self.temp, "vary": False},
         }
         return self.make_params(guesses=guesses)
+
+
+class LossvsnbarModel(QivsnbarModel):
+    """Fit internal loss 1/Qi vs nbar; same parameters and guesses as QivsnbarModel"""
+
+    def __init__(self, fr, temp, *args, **kwargs):
+        """ """
+        self.fr = fr
+        self.temp = temp
+        FitModel.__init__(self, lossvsnbar, *args, **kwargs)
+
+    def guess(self, data, x):
+        """guess from Qi = 1 / data, exactly as QivsnbarModel does"""
+        return super().guess(1 / np.asarray(data), x)

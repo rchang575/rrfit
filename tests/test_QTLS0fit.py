@@ -150,3 +150,42 @@ def test_fit_qtls0_line_attenuation_matches_legacy_attenuation_and_rescales_nc()
     assert unattenuated.qtls0_best_values["nc"] == pytest.approx(
         1e4 * modern.qtls0_best_values["nc"], rel=1e-3
     )
+
+
+def test_fit_qtls0_loss_space_requires_loss_errors():
+    from synthetic import overcoupled_qtls0_device
+    from rrfit.QTLS0fit import fit_qtls0
+
+    with pytest.raises(ValueError, match="compute_loss_errors"):
+        fit_qtls0(overcoupled_qtls0_device(), loss_space=True)
+
+
+def test_fit_qtls0_loss_space_on_overcoupled_device():
+    import contextlib
+    import copy
+    import io
+
+    from synthetic import QTLS0_TRUE, overcoupled_qtls0_device
+    from rrfit.QTLS0fit import fit_qtls0
+    from rrfit.losserr import compute_loss_errors
+
+    device = overcoupled_qtls0_device(seed=0)
+    compute_loss_errors(device)
+    qi_before = [(tr.Qi, tr.Qi_err) for tr in device.traces]
+    default = copy.deepcopy(device)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        fit_qtls0(default)
+        fit_qtls0(device, loss_space=True)
+
+    traces = sorted(device.traces, key=lambda tr: tr.power)
+    result = device.qtls0_fit_result
+    np.testing.assert_allclose(result.data, [1 / tr.Qi for tr in traces])
+    np.testing.assert_allclose(result.weights, [1 / tr.loss_err for tr in traces])
+    assert [(tr.Qi, tr.Qi_err) for tr in device.traces] == qi_before
+    # Qi_err ignores the phi systematic, so the default fit is badly overdispersed;
+    # the loss-space errors describe the scatter and recover the true qtls0.
+    assert default.qtls0_fit_result.redchi > 100
+    assert result.redchi < 3
+    assert abs(device.qtls0 - QTLS0_TRUE["qtls0"]) < 3 * device.qtls0_err
+    assert set(device.qtls0_best_values) == set(default.qtls0_best_values)

@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 
 from rrfit.dataio import Device
 from rrfit.fitfns import dBmtoW, nbarvsPin, Qivsnbar
-from rrfit.models import QivsnbarModel
+from rrfit.losserr import loss_arrays, qi_errorbars_from_loss
+from rrfit.models import LossvsnbarModel, QivsnbarModel
 from rrfit.waterfall import _get_device_line_attenuation
 
 
@@ -28,7 +29,7 @@ def _store_qtls0_fit_summary(device, result):
     device.qtls0_param_errors = _params_to_error_dict(result.params)
 
 
-def fit_qtls0(device: Device, weighted: bool = True):
+def fit_qtls0(device: Device, weighted: bool = True, loss_space: bool = False):
     """Fit Qi vs nbar at base temperature to extract QTLS0.
 
     Args:
@@ -36,6 +37,12 @@ def fit_qtls0(device: Device, weighted: bool = True):
         weighted: if True (default), weight residuals by ``1 / Qi_err``; every
             non-excluded trace must then have a finite, positive ``Qi_err``.
             Pass False for the historical unweighted fit.
+        loss_space: if True, fit the internal loss ``1/Qi`` with the model
+            ``1/QTLS + 1/Qother`` instead of ``Qi``, weighted by ``1 / loss_err``
+            (when ``weighted``). Requires ``rrfit.losserr.compute_loss_errors``
+            to have been run on the device. Results are stored in the same device
+            attributes as the default fit; fit a ``copy.deepcopy`` of the device
+            to keep both. Default False leaves the fit unchanged.
     """
     traces = [tr for tr in device.traces if not tr.is_excluded]
     traces.sort(key=lambda x: x.power)
@@ -57,7 +64,11 @@ def fit_qtls0(device: Device, weighted: bool = True):
     nbar = nbarvsPin(pow_W, fr_avg, Ql, avgQc)
 
     fit_kwargs = {}
-    if weighted:
+    if loss_space:
+        loss, loss_err = loss_arrays(traces)
+        if weighted:
+            fit_kwargs["weights"] = 1 / loss_err
+    elif weighted:
         Qi_err = np.asarray(Qi_err, dtype=float)
         if not np.all(np.isfinite(Qi_err) & (Qi_err > 0)):
             raise ValueError(
@@ -65,7 +76,10 @@ def fit_qtls0(device: Device, weighted: bool = True):
                 "non-excluded trace"
             )
         fit_kwargs["weights"] = 1 / Qi_err
-    result = QivsnbarModel(fr=fr_avg, temp=temp_avg).fit(Qi, nbar, **fit_kwargs)
+    if loss_space:
+        result = LossvsnbarModel(fr=fr_avg, temp=temp_avg).fit(loss, nbar, **fit_kwargs)
+    else:
+        result = QivsnbarModel(fr=fr_avg, temp=temp_avg).fit(Qi, nbar, **fit_kwargs)
     print(result.fit_report())
 
     device.qtls0 = result.best_values["qtls0"]
@@ -84,7 +98,8 @@ def fit_qtls0(device: Device, weighted: bool = True):
                            fr_avg, temp_avg)
     res_ax.scatter(nbar, result.residual, s=8, c="k")
     res_ax.set(xlabel="nbar", ylabel="residuals")
-    data_ax.errorbar(nbar, Qi, yerr=Qi_err, fmt="ko", label="data")
+    yerr = qi_errorbars_from_loss(loss, loss_err) if loss_space else Qi_err
+    data_ax.errorbar(nbar, Qi, yerr=yerr, fmt="ko", label="data")
     #data_ax.errorbar(nbar, Qi, yerr=0, fmt="ko", label="data")
     data_ax.plot(nbar_interp, qint_interp, c="r", ls="--", label="best fit")
     data_ax.set(xlabel="nbar", ylabel="Qi", yscale="log", xscale="log")

@@ -27,6 +27,11 @@ def Qivsnbar(x, qtls0, nc, beta, Qother, fr, temp):
     return 1 / (1 / qtls + 1 / Qother)
 
 
+def lossvsnbar(x, qtls0, nc, beta, Qother, fr, temp):
+    """x: nbar. Internal loss 1/Qi, the reciprocal of ``Qivsnbar``."""
+    return 1 / Qivsnbar(x, qtls0, nc, beta, Qother, fr, temp)
+
+
 def rr_s21_hanger(x, fr, Ql, absQc, phi=0, a=1, alpha=0, tau=0):
     """
     complex s21 model for resonators in hanger/transmission mode
