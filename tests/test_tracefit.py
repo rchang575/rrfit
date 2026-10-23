@@ -41,7 +41,7 @@ def test_clean_device_triggers_no_refits():
     summary = _quiet(fit_traces, device)
 
     assert summary["refit"] == summary["drifted"] == []
-    assert device.n_clean == 4
+    assert device.n_clean == 3  # -50, -40, -30 dBm
     assert device.phi_ref == pytest.approx(PHI0, abs=1e-3)
     assert device.absQc_ref == pytest.approx(QC, rel=1e-3)
     for tr in device.traces:
@@ -52,11 +52,27 @@ def test_clean_device_triggers_no_refits():
         assert (tr.phi_ref, tr.absQc_ref) == (device.phi_ref, device.absQc_ref)
 
 
-def test_clean_power_min_defaults_to_minus_60_dbm():
+def test_clean_power_min_defaults_to_minus_50_dbm():
     device = s21_device()
     _quiet(fit_traces, device)
-    assert device.n_clean == 4
-    assert clean_reference(device.traces, clean_power_min=-50.0)["n_clean"] == 3
+    assert device.n_clean == 3
+    assert clean_reference(device.traces)["n_clean"] == 3
+    assert clean_reference(device.traces, clean_power_min=-60.0)["n_clean"] == 4
+
+
+def test_reference_sigma_is_floored_at_the_clean_fit_errors():
+    device = s21_device()
+    for tr in device.traces:
+        _fitted(tr)
+    clean = device.traces[1:3]
+    clean[1].phi, clean[1].absQc = clean[0].phi, clean[0].absQc  # identical: robust spread 0
+
+    ref = clean_reference(clean)
+
+    assert ref["n_clean"] == 2
+    assert ref["phi_sigma"] == pytest.approx(np.median([t.phi_err for t in clean]))
+    assert ref["absQc_sigma"] == pytest.approx(np.median([t.absQc_err for t in clean]))
+    assert ref["phi_sigma"] > 0 and ref["absQc_sigma"] > 0
 
 
 def test_noisy_low_power_trace_is_refit_with_fixed_absqc():
@@ -72,10 +88,22 @@ def test_noisy_low_power_trace_is_refit_with_fixed_absqc():
     assert tr.Qi_free < 0.3 * S21_QI
     assert tr.absQc == device.absQc_ref
     assert tr.absQc_err == device.absQc_ref_sigma > 0
+    # the stored normalization is ~12% off, beyond the default +/-10% background bound
+    assert tr.background_at_bound is True
+    assert tr.refit_rejected == ""
     assert abs(tr.Qi - S21_QI) < tr.Qi_err
+    assert tr.Qi > 2.5 * tr.Qi_free
+
+
+def test_wider_background_bound_recovers_noisy_trace():
+    device = s21_device([s21_trace(-80.0, 0.2, 0)])
+
+    _quiet(fit_traces, device, background_rtol=0.3)
+
+    tr = device.traces[4]
+    assert tr.fit_method == "circle_fixed_absQc"
+    assert tr.background_at_bound is False
     assert tr.Qi == pytest.approx(S21_QI, rel=0.25)
-    # the free values stay available
-    assert (tr.fit_method_free, tr.redchi_free) == ("circle", tr.redchi_free)
 
 
 def test_noisy_trace_needs_background_refit_to_recover_qi():
@@ -141,10 +169,12 @@ def test_negative_qi_circle_fixed_falls_back_to_magnitude_when_refit_fails(monke
     monkeypatch.setattr("rrfit.tracefit._refit_circle_fixed", failing_refit)
     device = s21_device([_negative_qi_trace()])
 
-    with pytest.warns(RuntimeWarning, match="trace#4 failed"):
+    with pytest.warns(RuntimeWarning, match="trace#4 rejected"):
         summary = _quiet(fit_traces, device, negative_qi="circle_fixed")
 
     assert summary["refit"] == []
+    assert summary["rejected"] == {4: "error"}
+    assert device.traces[4].refit_rejected == "error"
     assert device.traces[4].fit_method == "magnitude"
     assert device.traces[4].Qi > 0
 
@@ -203,7 +233,7 @@ def test_refit_fixed_rejects_nonpositive_qi_and_keeps_free_fit(monkeypatch):
 
     from uncertainties import ufloat
 
-    def negative_refit(trace, phi_u=None, absQc_u=None, refit_background=True):
+    def negative_refit(trace, phi_u=None, absQc_u=None, refit_background=True, background_rtol=0.1):
         u = ufloat(1.0, 0.1)
         values = dict(fr=u, Ql=u, absQc=u, phi=u, Qi=ufloat(-1e7, 1e6))
         return SimpleNamespace(chisqr=1.0, redchi=1.0), values, {"background_amp": 2.0}
@@ -215,6 +245,8 @@ def test_refit_fixed_rejects_nonpositive_qi_and_keeps_free_fit(monkeypatch):
     with pytest.warns(RuntimeWarning, match=r"Qi = -1e\+07.*keeping the free fit"):
         assert not refit_fixed(tr, absQc=(QC, 1e3))
 
+    assert tr.refit_rejected == "Qi<=0"
+    del tr.refit_rejected
     assert vars(tr).keys() == before.keys()
     for key, value in before.items():
         assert vars(tr)[key] is value
@@ -226,17 +258,17 @@ def test_refit_fixed_requires_a_parameter():
 
 
 def test_too_few_clean_traces_warns_and_keeps_free_fits():
-    traces = [s21_trace(p, 0.002, i) for i, p in enumerate((-50.0, -40.0, -80.0))]
+    traces = [s21_trace(p, 0.002, i) for i, p in enumerate((-50.0, -60.0, -80.0))]
     traces.append(s21_trace(-80.0, 0.2, 0))
     device = s21_device()
     device.traces = traces
     for idx, tr in enumerate(traces):
         tr.id = idx
 
-    with pytest.warns(RuntimeWarning, match="only 2 clean traces"):
+    with pytest.warns(RuntimeWarning, match=r"only 1 clean traces \(min_clean=2\)"):
         summary = _quiet(fit_traces, device)
 
-    assert summary == {"refit": [], "drifted": []}
+    assert summary == {"refit": [], "drifted": [], "rejected": {}}
     assert device.phi_ref is None and device.n_clean == 0
     assert all(tr.fit_method == "circle" for tr in traces)
     assert all(tr.drift == "" for tr in traces)
@@ -298,3 +330,93 @@ def test_fit_s21_v2_only_draws_figures_when_plotting(plot):
     assert bool(plt.get_fignums()) is plot
     assert trace.Qi == pytest.approx(S21_QI, rel=0.05)
     plt.close("all")
+
+
+def _device_from(traces):
+    device = s21_device()
+    device.traces = traces
+    for idx, tr in enumerate(traces):
+        tr.id = idx
+    return device
+
+
+def test_refit_rejected_when_redchi_gets_much_worse():
+    device = s21_device([s21_trace(-80.0, 0.2, 0)])
+
+    with pytest.warns(RuntimeWarning, match=r"trace#4 rejected \(redchi .* > 0\.5x\)"):
+        summary = _quiet(fit_traces, device, redchi_ratio_max=0.5)
+
+    tr = device.traces[4]
+    assert summary["refit"] == [] and summary["rejected"] == {4: "redchi"}
+    assert tr.refit_rejected == "redchi"
+    assert tr.fit_method == "circle"
+    assert (tr.Qi, tr.absQc, tr.redchi) == (tr.Qi_free, tr.absQc_free, tr.redchi_free)
+    assert tr.background_amp == tr.background_amp_free
+
+
+def test_refit_fixed_redchi_guard_can_be_disabled():
+    tr = _fitted(s21_trace(-80.0, 0.2, 0))
+
+    assert _quiet(refit_fixed, tr, absQc=(QC, 1e3), redchi_ratio_max=None)
+    assert tr.refit_rejected == ""
+
+
+def _undercoupled_device(qi=2e6):
+    # Qi / |Qc| = 2 < overcoupling_min; the tilted -70 dBm trace drifts in phi
+    traces = [s21_trace(p, 0.002, i, qi=qi) for i, p in enumerate((-60.0, -50.0, -40.0, -30.0))]
+    traces.append(s21_trace(-70.0, 0.002, 1, qi=qi, background_slope=-0.2))
+    return _device_from(traces)
+
+
+def test_undercoupled_drift_is_flagged_but_not_refit():
+    device = _undercoupled_device()
+
+    summary = _quiet(fit_traces, device)
+
+    tr = device.traces[4]
+    assert "phi" in tr.drift.split(",")
+    assert summary["drifted"] == [4] and summary["refit"] == []
+    assert summary["rejected"] == {4: "undercoupled"}
+    assert tr.refit_rejected == "undercoupled"
+    assert tr.fit_method == "circle" and tr.Qi == tr.Qi_free
+
+
+def test_overcoupling_min_controls_the_gate():
+    device = _undercoupled_device()
+
+    _quiet(fit_traces, device, overcoupling_min=1.0)
+
+    assert device.traces[4].fit_method.startswith("circle_fixed")
+
+
+def test_fix_phi_overcoupled_refits_undetected_phi_offset():
+    # a 0.035 rad phi offset is below phi_tol but biases Qi on a 20x overcoupled trace
+    default = s21_device([s21_trace(-70.0, 0.002, 1, background_slope=-0.03)])
+    _quiet(fit_traces, default)
+    assert default.traces[4].drift == ""
+    assert default.traces[4].fit_method == "circle"
+    assert default.traces[4].Qi < 0.85 * S21_QI
+
+    device = s21_device([s21_trace(-70.0, 0.002, 1, background_slope=-0.03)])
+    summary = _quiet(fit_traces, device, fix_phi_overcoupled=True)
+
+    tr = device.traces[4]
+    # trace 0 (-60 dBm) is overcoupled but not a reference trace, so it is refit too
+    assert summary["refit"] == [0, 4] and summary["drifted"] == []
+    assert tr.fit_method == "circle_fixed_phi"
+    assert (tr.phi, tr.phi_err) == (device.phi_ref, device.phi_ref_sigma)
+    assert tr.Qi == pytest.approx(S21_QI, rel=0.05)
+    assert device.traces[0].Qi == pytest.approx(S21_QI, rel=0.05)
+    # reference traces are left alone
+    assert all(t.fit_method == "circle" for t in device.traces[1:4])
+
+
+def test_fix_phi_overcoupled_skips_undercoupled_traces():
+    device = _undercoupled_device()
+    device.traces[4] = s21_trace(-70.0, 0.002, 1, qi=2e6, background_slope=-0.03)
+    device.traces[4].id = 4
+
+    summary = _quiet(fit_traces, device, fix_phi_overcoupled=True)
+
+    assert summary["refit"] == []
+    assert device.traces[4].fit_method == "circle"
