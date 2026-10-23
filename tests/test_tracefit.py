@@ -285,3 +285,16 @@ def test_robust_sigma():
     values = np.array([1.0, 2.0, 3.0, 4.0, 100.0])
     assert _robust_sigma(values) == pytest.approx(1.4826)
     assert _robust_sigma(np.array([1.0, 1.0, 1.0, 2.0])) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("plot", [False, True])
+def test_fit_s21_v2_only_draws_figures_when_plotting(plot):
+    plt.close("all")
+    trace = s21_trace(-50.0, 0.002, 3)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        fit_s21_v2(trace, plot=plot)
+
+    assert bool(plt.get_fignums()) is plot
+    assert trace.Qi == pytest.approx(S21_QI, rel=0.05)
+    plt.close("all")
