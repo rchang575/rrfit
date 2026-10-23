@@ -54,7 +54,11 @@ def estimate_sigma_phi(
     reference: Optional[Callable[[Trace], bool]] = None,
     min_power: float = DEFAULT_REFERENCE_MIN_POWER,
 ) -> float:
-    """Sample standard deviation (``ddof=1``) of ``phi`` over the reference traces.
+    """Spread of ``phi`` over the reference traces.
+
+    The sample standard deviation (``ddof=1``) of ``phi``, floored at the median
+    ``phi_err`` of the reference traces that report a finite, positive one, so
+    two traces that happen to agree do not give an artificially small value.
 
     Args:
         device: device whose traces are inspected.
@@ -69,13 +73,19 @@ def estimate_sigma_phi(
         def reference(trace):
             return is_reference_trace(trace, min_power)
 
-    phis = np.array([tr.phi for tr in device.traces if reference(tr)], dtype=float)
+    refs = [tr for tr in device.traces if reference(tr)]
+    phis = np.array([tr.phi for tr in refs], dtype=float)
     if phis.size < 2:
         raise ValueError(
             f"estimate_sigma_phi needs at least 2 reference traces, found {phis.size} "
             f"on device {device.name!r}; relax min_power or pass a reference predicate"
         )
-    return float(np.std(phis, ddof=1))
+    sigma = float(np.std(phis, ddof=1))
+    errs = np.array([getattr(tr, "phi_err", None) for tr in refs], dtype=float)
+    errs = errs[np.isfinite(errs) & (errs > 0)]
+    if errs.size:
+        sigma = max(sigma, float(np.median(errs)))
+    return sigma
 
 
 def compute_loss_errors(

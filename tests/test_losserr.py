@@ -59,6 +59,17 @@ def test_estimate_sigma_phi_uses_only_reference_traces():
     assert custom == pytest.approx(np.std([0.30, 0.27], ddof=1))
 
 
+def test_estimate_sigma_phi_is_floored_at_reference_phi_err():
+    agreeing = Device(name="d", traces=[_trace(phi=0.3, phi_err=2e-3), _trace(phi=0.3, phi_err=4e-3)])
+    assert estimate_sigma_phi(agreeing) == pytest.approx(3e-3)
+
+    scattered = Device(name="d", traces=[_trace(phi=0.3), _trace(phi=0.4)])
+    assert estimate_sigma_phi(scattered) == pytest.approx(np.std([0.3, 0.4], ddof=1))
+
+    no_errors = Device(name="d", traces=[_trace(phi=0.3, phi_err=None), _trace(phi=0.3, phi_err=None)])
+    assert estimate_sigma_phi(no_errors) == 0.0
+
+
 def test_estimate_sigma_phi_needs_two_reference_traces():
     device = Device(name="d", traces=[_trace(), _trace(power=-90.0)])
     with pytest.raises(ValueError, match="at least 2 reference traces"):
