@@ -11,7 +11,7 @@ import numpy as np
 from lmfit import Parameters
 
 from rrfit.dataio import Device, Trace
-from rrfit.fitfns import Qivsnbar, dBmtoW, nbarvsPin
+from rrfit.fitfns import Qivsnbar, dBmtoW, nbarvsPin, rr_s21_hanger
 from rrfit.waterfall import _solve_consistent_qint
 
 FR = 5e9
@@ -79,3 +79,38 @@ def overcoupled_waterfall_device(seed=0, qi_err_frac=0.01, sigma_phi=SIGMA_PHI):
             )
             traces.append(_measured_trace(rng, power, temp, qi, qi_err_frac, sigma_phi))
     return Device(name="synthetic", traces=traces, line_attenuation=LINE_ATTENUATION)
+
+
+S21_QI = 2e7
+S21_TAU = 50e-9
+
+
+def s21_trace(power, noise, seed, qi=S21_QI, background_slope=0.0, temp=0.01, npts=401, span=10):
+    """Raw hanger S21 trace with known cable delay and complex background.
+
+    ``noise`` is the complex Gaussian noise relative to the off-resonant level.
+    ``background_slope`` (complex) adds an unmodelled linear-in-frequency
+    background ``1 + background_slope * (f - FR) / (f[-1] - FR)``, which the
+    free fit absorbs into ``phi``, ``absQc`` and ``Ql``.
+    """
+    rng = np.random.default_rng(seed)
+    ql = 1 / (1 / qi + np.cos(PHI0) / QC)
+    f = FR + np.linspace(-span, span, npts) * FR / ql / 2
+    # fit_s21_v2 removes the delay as exp(-2j*pi*f*tau) (fit_cable_delay convention),
+    # i.e. the measured phase grows as +2*pi*f*tau; rr_s21_hanger uses the opposite sign.
+    s21 = rr_s21_hanger(f, FR, ql, QC, PHI0, a=0.03, alpha=1.0, tau=-S21_TAU)
+    s21 = s21 * (1 + background_slope * (f - FR) / (f[-1] - FR))
+    s21 = s21 + 0.03 * noise * (rng.normal(size=npts) + 1j * rng.normal(size=npts))
+    return Trace(
+        frequency=f, s21real=s21.real, s21imag=s21.imag, tau=S21_TAU,
+        power=power, temperature=temp, is_excluded=False,
+    )
+
+
+def s21_device(extra=(), seed=0):
+    """Clean traces from -60 to -30 dBm plus the ``extra`` traces, ids assigned in order."""
+    traces = [s21_trace(p, 0.002, seed + i) for i, p in enumerate((-60.0, -50.0, -40.0, -30.0))]
+    traces += list(extra)
+    for idx, trace in enumerate(traces):
+        trace.id = idx
+    return Device(name="synthetic_s21", traces=traces, line_attenuation=LINE_ATTENUATION)
