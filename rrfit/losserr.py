@@ -22,7 +22,7 @@ import numpy as np
 
 from rrfit.dataio import Device, Trace
 
-DEFAULT_REFERENCE_MIN_POWER = -50.0
+DEFAULT_REFERENCE_MIN_POWER = -60.0
 
 
 def is_reference_trace(trace: Trace, min_power: float = DEFAULT_REFERENCE_MIN_POWER) -> bool:
