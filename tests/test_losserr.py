@@ -23,8 +23,8 @@ def _trace(**kwargs):
 
 def test_is_reference_trace_default_rules():
     assert is_reference_trace(_trace())
-    assert is_reference_trace(_trace(power=-60.0))
-    assert not is_reference_trace(_trace(power=-60.1))
+    assert is_reference_trace(_trace(power=-50.0))
+    assert not is_reference_trace(_trace(power=-50.1))
     assert not is_reference_trace(_trace(power=None))
     assert not is_reference_trace(_trace(is_excluded=True))
     assert not is_reference_trace(_trace(phi_err=0.0))
@@ -36,8 +36,7 @@ def test_is_reference_trace_default_rules():
     circle.fit_method = "circle"
     assert not is_reference_trace(magnitude)
     assert is_reference_trace(circle)
-    assert not is_reference_trace(_trace(power=-70.0))
-    assert is_reference_trace(_trace(power=-70.0), min_power=-70.0)
+    assert is_reference_trace(_trace(power=-60.0), min_power=-60.0)
 
 
 def test_is_reference_trace_tolerates_missing_attributes():
